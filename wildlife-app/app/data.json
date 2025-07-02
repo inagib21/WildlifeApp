@@ -1,0 +1,74 @@
+[
+  {
+    "id": 1,
+    "header": "Camera 1 - North Trail",
+    "type": "Motion Detection",
+    "status": "Active",
+    "target": "18",
+    "limit": "5",
+    "reviewer": "System"
+  },
+  {
+    "id": 2,
+    "header": "Camera 2 - South Trail",
+    "type": "Motion Detection",
+    "status": "Active",
+    "target": "29",
+    "limit": "24",
+    "reviewer": "System"
+  },
+  {
+    "id": 3,
+    "header": "Camera 3 - East Trail",
+    "type": "Motion Detection",
+    "status": "Active",
+    "target": "10",
+    "limit": "13",
+    "reviewer": "System"
+  },
+  {
+    "id": 4,
+    "header": "Camera 4 - West Trail",
+    "type": "Motion Detection",
+    "status": "Active",
+    "target": "27",
+    "limit": "23",
+    "reviewer": "System"
+  },
+  {
+    "id": 5,
+    "header": "Camera 5 - Water Hole",
+    "type": "Motion Detection",
+    "status": "Active",
+    "target": "2",
+    "limit": "16",
+    "reviewer": "System"
+  },
+  {
+    "id": 6,
+    "header": "Camera 6 - Feeding Station",
+    "type": "Motion Detection",
+    "status": "Active",
+    "target": "20",
+    "limit": "8",
+    "reviewer": "System"
+  },
+  {
+    "id": 7,
+    "header": "Camera 7 - Nesting Area",
+    "type": "Motion Detection",
+    "status": "Active",
+    "target": "19",
+    "limit": "21",
+    "reviewer": "System"
+  },
+  {
+    "id": 8,
+    "header": "Camera 8 - Migration Path",
+    "type": "Motion Detection",
+    "status": "Active",
+    "target": "25",
+    "limit": "26",
+    "reviewer": "System"
+  }
+] 

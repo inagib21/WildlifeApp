@@ -1,0 +1,35 @@
+services:
+  postgres:
+    # Switched to pg_mooncake for real-time analytics
+    image: mooncakelabs/pg_mooncake
+    container_name: wildlife-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: wildlife
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  motioneye:
+    image: ghcr.io/motioneye-project/motioneye:edge
+    container_name: wildlife-motioneye
+    ports:
+      - "8765:8765"  # MotionEye web interface
+    volumes:
+      - ./motioneye_config:/etc/motioneye
+      - ./motioneye_media:/var/lib/motioneye
+    environment:
+      - TZ=America/New_York
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  motioneye_data: 
