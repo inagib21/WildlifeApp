@@ -2,6 +2,8 @@
 
 > **Note:** This setup and all instructions are for **Windows** users. Paths, venv, and commands are Windows-specific. For Linux/Mac, adapt accordingly.
 
+A full-stack platform for automated wildlife monitoring and analytics from camera trap images. This project demonstrates expertise in designing and integrating modern cloud-native systems—combining Python (FastAPI), React (Next.js), Docker, and real-time analytics with PostgreSQL. It features seamless camera integration, live dashboards, and AI-powered species recognition, all engineered with a focus on reliability, scalability, and user experience. The codebase highlights strengths in problem-solving, cross-stack development, and delivering robust, real-world solutions.
+
 A full-stack wildlife detection and analytics platform for camera trap images, using:
 - **FastAPI** (Python backend)
 - **Next.js** (React frontend)
