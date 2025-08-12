@@ -1,46 +1,68 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { DetectionCard } from "@/components/detection-card"
-import { getDetections, getDetectionsCount } from "@/lib/api"
+import * as React from "react"
 import { Detection } from "@/types/api"
-import { useDetectionsRealtime } from "@/hooks/use-realtime"
+import { getDetections, getDetectionsCount, getDetectionsChunked } from "@/lib/api"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { AlertCircle, Wifi, WifiOff } from "lucide-react"
+import Image from "next/image"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose } from "@/components/ui/dialog"
+
+const PAGE_SIZE = 12
 
 export function DetectionsList() {
-  const [detections, setDetections] = useState<Detection[]>([])
-  const [totalCount, setTotalCount] = useState<number>(0)
-  const [loading, setLoading] = useState(true)
-  const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
+  const [detections, setDetections] = React.useState<Detection[]>([])
+  const [totalCount, setTotalCount] = React.useState<number>(0)
+  const [loading, setLoading] = React.useState(true)
+  const [page, setPage] = React.useState(0)
+  const [sortBy, setSortBy] = React.useState<'timestamp' | 'confidence' | 'species' | 'camera'>('timestamp')
+  const [sortDir, setSortDir] = React.useState<'asc' | 'desc'>('desc')
+  const [selectedDetection, setSelectedDetection] = React.useState<Detection | null>(null)
 
-  // Real-time connection for new detections
-  const { isConnected, error } = useDetectionsRealtime((newDetection) => {
-    // Add new detection to the top of the list
-    setDetections(prev => [newDetection, ...prev.slice(0, 49)]) // Keep max 50 detections
-    setTotalCount(prev => prev + 1) // Increment total count
-    setLastUpdate(new Date())
+  React.useEffect(() => {
+    setLoading(true)
+    const fetchPage = async () => {
+      const offset = page * PAGE_SIZE
+      const data = await getDetectionsChunked(undefined, PAGE_SIZE + offset)
+      setDetections(data.slice(offset, offset + PAGE_SIZE))
+      const count = await getDetectionsCount()
+      setTotalCount(count)
+      setLoading(false)
+    }
+    fetchPage()
+  }, [page])
+
+  const pageCount = Math.ceil(totalCount / PAGE_SIZE)
+
+  // Sort detections in-memory (for now)
+  const sortedDetections = [...detections].sort((a, b) => {
+    let aVal, bVal
+    switch (sortBy) {
+      case 'timestamp':
+        aVal = new Date(a.timestamp).getTime(); bVal = new Date(b.timestamp).getTime(); break
+      case 'confidence':
+        aVal = a.confidence; bVal = b.confidence; break
+      case 'species':
+        aVal = a.species || ''; bVal = b.species || ''; break
+      case 'camera':
+        aVal = a.camera_name || a.camera_id; bVal = b.camera_name || b.camera_id; break
+      default:
+        aVal = 0; bVal = 0
+    }
+    if (aVal < bVal) return sortDir === 'asc' ? -1 : 1
+    if (aVal > bVal) return sortDir === 'asc' ? 1 : -1
+    return 0
   })
 
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [data, count] = await Promise.all([
-          getDetections(undefined, 50),
-          getDetectionsCount()
-        ])
-        setDetections(data)
-        setTotalCount(count)
-        setLastUpdate(new Date())
-      } catch (error) {
-        console.error('Error fetching detections:', error)
-      } finally {
-        setLoading(false)
-      }
+  const handleSort = (col: typeof sortBy) => {
+    if (sortBy === col) {
+      setSortDir(sortDir === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortBy(col)
+      setSortDir('desc')
     }
-
-    fetchData()
-  }, [])
+  }
 
   if (loading) {
     return (
@@ -56,61 +78,102 @@ export function DetectionsList() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-        <h1 className="text-3xl font-bold">Recent Detections</h1>
-          <div className="flex items-center gap-2">
-            {isConnected ? (
-              <Badge variant="default" className="bg-green-500">
-                <Wifi className="w-3 h-3 mr-1" />
-                Live
-              </Badge>
-            ) : (
-              <Badge variant="destructive">
-                <WifiOff className="w-3 h-3 mr-1" />
-                Offline
-              </Badge>
-            )}
-            {error && (
-              <Badge variant="destructive">
-                <AlertCircle className="w-3 h-3 mr-1" />
-                Error
-              </Badge>
-            )}
-          </div>
-        </div>
+        <h1 className="text-3xl font-bold">Detections</h1>
         <div className="text-sm text-muted-foreground">
-          {totalCount} total detections (showing {detections.length} most recent)
-          {lastUpdate && (
-            <div className="text-xs">
-              Last update: {lastUpdate.toLocaleTimeString()}
-            </div>
+          {totalCount} total detections | Page {page + 1} of {pageCount}
+        </div>
+      </div>
+      <div className="rounded-md border overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Photo</TableHead>
+              <TableHead className="cursor-pointer" onClick={() => handleSort('timestamp')}>
+                Timestamp {sortBy === 'timestamp' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+              </TableHead>
+              <TableHead className="cursor-pointer" onClick={() => handleSort('species')}>
+                Species {sortBy === 'species' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+              </TableHead>
+              <TableHead className="cursor-pointer" onClick={() => handleSort('confidence')}>
+                Confidence {sortBy === 'confidence' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+              </TableHead>
+              <TableHead className="cursor-pointer" onClick={() => handleSort('camera')}>
+                Camera {sortBy === 'camera' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
+              </TableHead>
+              <TableHead>Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sortedDetections.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={6} className="text-center">No detections found.</TableCell>
+              </TableRow>
+            ) : (
+              sortedDetections.map((detection) => {
+                const validImageUrl = (detection.media_url && (detection.media_url.startsWith("/") || detection.media_url.startsWith("http"))) ? detection.media_url : "/file.svg"
+                const commonName = detection.species && detection.species.includes(';') ? detection.species.split(';').pop()?.trim() : detection.species
+                return (
+                  <TableRow key={detection.id}>
+                    <TableCell>
+                      <div className="relative w-24 h-16 cursor-pointer" onClick={() => setSelectedDetection(detection)}>
+                        <Image src={validImageUrl} alt={`Detection ${detection.id}`} fill className="object-cover rounded" />
+                      </div>
+                    </TableCell>
+                    <TableCell>{new Date(detection.timestamp).toLocaleString()}</TableCell>
+                    <TableCell>{commonName}</TableCell>
+                    <TableCell><Badge>{Math.round(detection.confidence * 100)}%</Badge></TableCell>
+                    <TableCell>{detection.camera_name || detection.camera_id}</TableCell>
+                    <TableCell>
+                      <a href={validImageUrl} target="_blank" rel="noopener noreferrer">
+                        <Button size="sm" variant="outline">View</Button>
+                      </a>
+                    </TableCell>
+                  </TableRow>
+                )
+              })
+            )}
+          </TableBody>
+        </Table>
+      </div>
+      <div className="flex items-center justify-between mt-2">
+        <Button onClick={() => setPage(0)} disabled={page === 0} size="sm">First</Button>
+        <Button onClick={() => setPage(page - 1)} disabled={page === 0} size="sm">Previous</Button>
+        <span>Page {page + 1} of {pageCount}</span>
+        <Button onClick={() => setPage(page + 1)} disabled={page + 1 >= pageCount} size="sm">Next</Button>
+        <Button onClick={() => setPage(pageCount - 1)} disabled={page + 1 >= pageCount} size="sm">Last</Button>
+      </div>
+
+      {/* Photo detail modal */}
+      <Dialog open={!!selectedDetection} onOpenChange={() => setSelectedDetection(null)}>
+        <DialogContent className="max-w-lg">
+          {selectedDetection && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Detection #{selectedDetection.id}</DialogTitle>
+                <DialogDescription>
+                  <div className="mb-2">{new Date(selectedDetection.timestamp).toLocaleString()}</div>
+                </DialogDescription>
+              </DialogHeader>
+              <div className="relative w-full h-64 mb-4">
+                <Image src={(selectedDetection.media_url && (selectedDetection.media_url.startsWith("/") || selectedDetection.media_url.startsWith("http"))) ? selectedDetection.media_url : "/file.svg"} alt={`Detection ${selectedDetection.id}`} fill className="object-contain rounded" />
+              </div>
+              <div className="space-y-2 text-sm">
+                <div><b>Species:</b> {selectedDetection.species}</div>
+                <div><b>Confidence:</b> {Math.round(selectedDetection.confidence * 100)}%</div>
+                <div><b>Camera:</b> {selectedDetection.camera_name || selectedDetection.camera_id}</div>
+                <div><b>File size:</b> {selectedDetection.file_size ? `${selectedDetection.file_size} bytes` : 'N/A'}</div>
+                <div><b>Dimensions:</b> {selectedDetection.image_width && selectedDetection.image_height ? `${selectedDetection.image_width}x${selectedDetection.image_height}` : 'N/A'}</div>
+                <div><b>Image path:</b> {selectedDetection.image_path}</div>
+              </div>
+              <div className="flex justify-end mt-4">
+                <DialogClose asChild>
+                  <Button variant="outline">Close</Button>
+                </DialogClose>
+              </div>
+            </>
           )}
-        </div>
-      </div>
-      
-      {detections.length === 0 ? (
-        <div className="text-center py-12">
-          <div className="text-muted-foreground mb-4">
-            <AlertCircle className="w-12 h-12 mx-auto mb-4 opacity-50" />
-            <p className="text-lg font-medium">No detections yet</p>
-            <p className="text-sm">Detections will appear here when motion is detected and processed.</p>
-          </div>
-        </div>
-      ) : (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {detections.map((detection) => (
-          <DetectionCard
-            key={detection.id}
-            id={detection.id}
-            timestamp={detection.timestamp}
-            species={detection.species}
-            confidence={detection.confidence}
-            imageUrl={detection.media_url || detection.image_path}
-            cameraName={detection.camera_name || "Unknown Camera"}
-          />
-        ))}
-      </div>
-      )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 } 

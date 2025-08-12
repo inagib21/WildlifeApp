@@ -14,6 +14,8 @@ interface DetectionCardProps {
   cameraName: string
 }
 
+const PLACEHOLDER_IMAGE = "/file.svg"; // Use a public asset as a fallback
+
 export function DetectionCard({
   id,
   timestamp,
@@ -25,6 +27,12 @@ export function DetectionCard({
   const timeAgo = formatDistanceToNow(new Date(timestamp), { addSuffix: true })
   const formattedDate = format(new Date(timestamp), "yyyy-MM-dd h:mm:ss a")
   const confidencePercentage = Math.round(confidence * 100)
+
+  // Only use imageUrl if it's a web path
+  const validImageUrl = (imageUrl && (imageUrl.startsWith("/") || imageUrl.startsWith("http"))) ? imageUrl : PLACEHOLDER_IMAGE;
+
+  // Extract common name from taxonomy string
+  const commonName = species && species.includes(';') ? species.split(';').pop()?.trim() : species;
 
   return (
     <Card className="overflow-hidden">
@@ -42,7 +50,7 @@ export function DetectionCard({
       <CardContent className="p-0">
         <div className="relative aspect-video">
           <Image
-            src={imageUrl}
+            src={validImageUrl}
             alt={`Detection ${id}`}
             fill
             className="object-cover"
@@ -50,7 +58,7 @@ export function DetectionCard({
         </div>
         <div className="p-4 space-y-2">
           <div className="flex items-center justify-between">
-            <div className="font-medium">{species}</div>
+            <div className="font-medium">{commonName}</div>
             <Badge variant={confidencePercentage > 80 ? "default" : "secondary"}>
               {confidencePercentage}% confidence
             </Badge>

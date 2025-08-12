@@ -48,14 +48,31 @@ pip install -r requirements.txt
 ```sh
 docker-compose up -d
 ```
+### 4. Initialize and configure each camera on their local addresses eg...
+refer to microtik for addresses: http://192.168.88.1/
 
-### 4. Run the backend (FastAPI)
+(https://192.168.88.22/)
+
+### 5. Configure the cameras on motion eye : 
+ MotionEye: http://localhost:8765
+
+### 6. SUGGESTED: Run the frontend & backend together (Next.js) & (FastAPI)
+```sh
+cd wildlife-app
+npm install
+npm run dev:all
+```
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:8001/docs
+- MotionEye: http://localhost:8765
+
+### 7. OPTIONAL: Run the backend (FastAPI)
 ```sh
 cd backend
 python -m uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-### 5. Run the frontend (Next.js)
+### 8. OPTIONAL: Run the frontend (Next.js)
 ```sh
 cd ..
 npm install
@@ -87,6 +104,7 @@ npm run dev
 ## Camera Integration
 - **MotionEye** is used for camera management, live streaming, and image capture.
 - Camera configuration files are in `motioneye_config/`.
+- **Manual Camera Setup:** If you need to configure ESP32-CAM modules manually or set up custom camera hardware, refer to the [ESP32SETUP repository](https://github.com/inagib21/ESP32SETUP) for detailed PlatformIO setup instructions, hardware connections, and firmware configuration.
 
 ## Wildlife Classification
 - **SpeciesNet** (from [google/cameratrapai](https://github.com/google/cameratrapai)) is used for AI-based species classification.
@@ -102,4 +120,4 @@ npm run dev
 - This project integrates and extends these models for a full-stack, real-time analytics dashboard.
 
 ## License
-MIT or as specified. See [google/cameratrapai](https://github.com/google/cameratrapai) for model license details. 
+MIT or as specified. See [google/cameratrapai](https://github.com/google/cameratrapai) for model license details.

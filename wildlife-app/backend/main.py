@@ -33,6 +33,7 @@ from sqlalchemy import text
 import hashlib
 from pathlib import Path
 import aiofiles
+from hashlib import sha256
 
 load_dotenv()
 
@@ -224,6 +225,9 @@ except Exception as e:
     print("Database connection will be retried during startup")
     # Don't raise here - let the startup event handle it
 
+# Migration: add file_hash column if not present - moved to startup event
+from sqlalchemy import inspect
+
 # SpeciesNet integration
 class SpeciesNetProcessor:
     def __init__(self):
@@ -379,6 +383,7 @@ class Detection(Base):
     # SpeciesNet specific fields
     prediction_score = Column(Float, nullable=True)
     detections_json = Column(Text, nullable=True)  # Store full detection data as JSON
+    file_hash = Column(String, nullable=True, index=True)  # New: SHA256 hash of file
 
 # Create tables with explicit error logging
 try:
@@ -407,18 +412,28 @@ async def startup_event():
             # Create tables if they don't exist
             Base.metadata.create_all(bind=engine)
             print("Database tables created successfully")
+            
+            # Migration: add file_hash column if not present (after tables exist)
+            try:
+                insp = inspect(engine)
+                if not any(c['name'] == 'file_hash' for c in insp.get_columns('detections')):
+                    with engine.connect() as conn:
+                        conn.execute(text('ALTER TABLE detections ADD COLUMN file_hash VARCHAR'))
+                        print('Added file_hash column to detections table')
+            except Exception as migration_error:
+                print(f"Migration warning (non-critical): {migration_error}")
+                
         except Exception as e:
             print(f"Database connection failed: {e}")
             print("Please ensure PostgreSQL is running and accessible")
             # Continue startup - the app can still run without database initially
         
-        # Temporarily comment out all background tasks for diagnosis
-        # asyncio.create_task(run_photo_scanner())
-        # print("Photo scanner background task started")
-        # asyncio.create_task(sync_cameras_background_task())
-        # print("Camera sync background task started")
-        # asyncio.create_task(run_photo_scanner_once())
-        # print("Photo scanner initial sync started")
+        # Enable background camera sync task (periodic)
+        asyncio.create_task(periodic_camera_sync())
+        print("Camera sync background task started")
+        # Enable background photo scanner task
+        asyncio.create_task(run_photo_scanner())
+        print("Photo scanner background task started")
         print("Backend startup completed successfully!")
     except Exception as e:
         print(f"Error during startup: {e}")
@@ -475,7 +490,16 @@ async def sync_cameras_background(cameras):
     finally:
         db.close()
                     
-# Background camera sync task
+# Background camera sync task (periodic)
+async def periodic_camera_sync():
+    """Periodically sync cameras from MotionEye every 2 minutes"""
+    while True:
+        try:
+            await sync_cameras_background_task()
+        except Exception as e:
+            print(f"Camera sync periodic task error: {e}")
+        await asyncio.sleep(120)  # 2 minutes
+
 async def sync_cameras_background_task():
     """Background task to sync cameras from MotionEye"""
     try:
@@ -855,32 +879,32 @@ def get_detections(
         # Generate media URL from image path
         if detection.image_path:
             try:
-                # Extract camera, date, and filename from image path
-                path_parts = detection.image_path.split(os.sep)
-                if len(path_parts) >= 3:
-                    camera_folder = path_parts[-3]  # Camera1, Camera2, etc.
-                    date_folder = path_parts[-2]    # 2025-06-20
-                    filename = path_parts[-1]       # 17-40-48.jpg
-                    
-                    # Extract camera ID from folder name (Camera1 -> 1)
-                    if camera_folder.startswith('Camera'):
-                        camera_id_from_path = camera_folder.replace('Camera', '')
-                        detection_dict["media_url"] = f"/media/{camera_id_from_path}/{date_folder}/{filename}"
-                else:
-                        # Fallback: use the camera_id from database
-                        detection_dict["media_url"] = f"/media/{detection.camera_id}/{date_folder}/{filename}"
+                # Normalize path for both Windows and Linux
+                path = detection.image_path.replace("\\", "/")
+                parts = path.split("/")
+                # Look for motioneye_media/CameraX/date/filename or archived_photos/common_name/camera/date/filename
+                if "motioneye_media" in parts:
+                    idx = parts.index("motioneye_media")
+                    if len(parts) > idx + 3:
+                        camera_folder = parts[idx + 1]  # Camera1
+                        date_folder = parts[idx + 2]    # 2025-07-15
+                        filename = parts[idx + 3]       # 11-00-07.jpg
+                        detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
+                elif "archived_photos" in parts:
+                    idx = parts.index("archived_photos")
+                    if len(parts) > idx + 4:
+                        # archived_photos/common_name/camera/date/filename
+                        camera_folder = parts[idx + 2]  # 1 or Camera1
+                        date_folder = parts[idx + 3]    # 2025-07-15
+                        filename = parts[idx + 4]       # 11-00-07.jpg
+                        # Use CameraX format for consistency
+                        if not str(camera_folder).startswith("Camera"):
+                            camera_folder = f"Camera{camera_folder}"
+                        detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
             except Exception as e:
-                print(f"Error generating media URL for detection {detection.id}: {e}")
-                # Fallback: use camera_id and current date
-                try:
-                    date_str = detection.timestamp.strftime('%Y-%m-%d')
-                    filename = os.path.basename(detection.image_path) if detection.image_path else "unknown.jpg"
-                    detection_dict["media_url"] = f"/media/{detection.camera_id}/{date_str}/{filename}"
-                except:
-                    pass
-        
+                print(f"Error generating media_url for detection {detection.id}: {e}")
+                detection_dict["media_url"] = None
         result.append(DetectionResponse(**detection_dict))
-    
     return result
 
 @app.get("/api/detections", response_model=List[DetectionResponse])
@@ -1248,10 +1272,16 @@ def get_media(camera: str, date: str, filename: str):
     archive_path = None
     archive_root = os.path.join(project_root, "archived_photos")
     if os.path.exists(archive_root):
+        # Search all subfolders (species folders) for the file
         for species_folder in os.listdir(archive_root):
             species_path = os.path.join(archive_root, species_folder, camera, date, filename)
             if os.path.exists(species_path):
                 archive_path = species_path
+                break
+            # Also try with camera_name (CameraX) for robustness
+            species_path_alt = os.path.join(archive_root, species_folder, camera_name, date, filename)
+            if os.path.exists(species_path_alt):
+                archive_path = species_path_alt
                 break
     
     print(f"Media request: camera={camera}, date={date}, filename={filename}")
@@ -1319,10 +1349,19 @@ def get_species_counts(
     return species_counts
 
 @app.get("/detections/unique-species-count")
-def get_unique_species_count(db: Session = Depends(get_db)):
-    """Get total count of unique species from all detections"""
-    unique_species_count = db.query(Detection.species).distinct().count()
-    return {"count": unique_species_count}
+def analytics_detections_unique_species_count(
+    days: int = 30
+):
+    """Return the number of unique species detected in the last N days."""
+    sql = f"""
+        SELECT COUNT(DISTINCT species) as unique_species
+        FROM detections_iceberg
+        WHERE timestamp >= NOW() - INTERVAL '{days} days'
+    """
+    with engine.connect() as conn:
+        result = conn.execute(text(sql))
+        unique_species = result.scalar()
+    return {"unique_species": unique_species}
 
 class PhotoScanner:
     def __init__(self, db: Session):
@@ -1337,15 +1376,23 @@ class PhotoScanner:
         
         self.load_processed_files()
     
+    def compute_file_hash(self, file_path: str) -> str:
+        """Compute SHA256 hash of a file"""
+        h = sha256()
+        with open(file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
     def load_processed_files(self):
-        """Load list of already processed files from database"""
+        """Load set of already processed file hashes from database"""
         detections = self.db.query(Detection).all()
+        self.processed_hashes = set()
         for detection in detections:
-            if detection.image_path:
-                # Create a unique identifier for the file
-                file_id = self.get_file_id(detection.image_path)
-                self.processed_files.add(file_id)
-    
+            if detection.file_hash:
+                self.processed_hashes.add(detection.file_hash)
+        print(f"[PhotoScanner] Loaded {len(self.processed_hashes)} processed file hashes from database.")
+
     def get_file_id(self, file_path: str) -> str:
         """Create unique identifier for a file"""
         # Use camera + date + filename as unique ID
@@ -1363,20 +1410,23 @@ class PhotoScanner:
             # Skip archiving if species is "Unknown"
             if species.lower() == "unknown":
                 return original_path
-            
+
+            # Use only the common name (last part after semicolons) for the species folder
+            common_name = species.split(';')[-1].strip() if ';' in species else species.strip()
+
             # Create archive path: archived_photos/species/camera_id/date/filename
             path_parts = original_path.split(os.sep)
             if len(path_parts) >= 3:
                 date = path_parts[-2]  # 2025-06-20
                 filename = path_parts[-1]  # 17-40-48.jpg
-                
+
                 # Create archive directory structure
-                archive_dir = os.path.join(self.archive_root, species.lower(), str(camera_id), date)
+                archive_dir = os.path.join(self.archive_root, common_name.lower(), str(camera_id), date)
                 os.makedirs(archive_dir, exist_ok=True)
-                
+
                 # Archive file path
                 archive_path = os.path.join(archive_dir, filename)
-                
+
                 # Copy the file to archive
                 if os.path.exists(original_path):
                     shutil.copy2(original_path, archive_path)
@@ -1388,105 +1438,94 @@ class PhotoScanner:
             else:
                 print(f"Invalid path structure: {original_path}")
                 return original_path
-                
+
         except Exception as e:
             print(f"Error archiving photo {original_path}: {e}")
             return original_path
     
     def scan_for_unprocessed_photos(self) -> list:
-        """Scan motioneye_media folders for photos not in database"""
+        """Scan motioneye_media folders for photos not in database (by file hash)"""
         unprocessed_photos = []
-        
         if not os.path.exists(self.media_root):
+            print(f"[PhotoScanner] media_root does not exist: {self.media_root}")
             return unprocessed_photos
-        
         for camera_folder in os.listdir(self.media_root):
             camera_path = os.path.join(self.media_root, camera_folder)
             if not os.path.isdir(camera_path):
                 continue
-                
             for date_folder in os.listdir(camera_path):
                 date_path = os.path.join(camera_path, date_folder)
                 if not os.path.isdir(date_path) or len(date_folder) != 10:
                     continue
-                
                 for filename in os.listdir(date_path):
                     if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
                         continue
-                    
                     file_path = os.path.join(date_path, filename)
-                    file_id = self.get_file_id(file_path)
-                    
-                    if file_id not in self.processed_files:
+                    try:
+                        file_hash = self.compute_file_hash(file_path)
+                    except Exception as e:
+                        print(f"[PhotoScanner] Error hashing {file_path}: {e}")
+                        continue
+                    if file_hash not in self.processed_hashes:
                         unprocessed_photos.append({
                             'file_path': file_path,
                             'camera': camera_folder,
                             'date': date_folder,
                             'filename': filename,
-                            'file_id': file_id
+                            'file_hash': file_hash
                         })
-        
+                    else:
+                        print(f"[PhotoScanner] Skipping already processed file (by hash): {file_path}")
+        print(f"[PhotoScanner] Found {len(unprocessed_photos)} unprocessed photos.")
         return unprocessed_photos
     
     async def process_photo(self, photo_info: dict):
-        """Process a single photo with SpeciesNet"""
+        """Process a single photo with SpeciesNet, using file hash deduplication"""
         try:
-            # Extract camera ID from camera name (Camera1 -> 1)
             camera_id = int(photo_info['camera'].replace('Camera', ''))
-            
-            # Check if camera exists in database
             camera = self.db.query(Camera).filter(Camera.id == camera_id).first()
             if not camera:
                 print(f"Camera {camera_id} not found in database, skipping {photo_info['filename']}")
                 return
-            
-            # Process with SpeciesNet
+            file_hash = photo_info.get('file_hash')
+            if not file_hash:
+                file_hash = self.compute_file_hash(photo_info['file_path'])
+            # Double-check hash not in DB (race condition safety)
+            if self.db.query(Detection).filter(Detection.file_hash == file_hash).first():
+                print(f"[PhotoScanner] File hash already in DB, skipping: {photo_info['file_path']}")
+                return
             speciesnet_response = await self.call_speciesnet(photo_info['file_path'])
             if not speciesnet_response:
                 print(f"SpeciesNet processing failed for {photo_info['filename']}")
                 return
-            
-            # Extract species and confidence from SpeciesNet response
-            # SpeciesNet returns a dictionary with predictions
             species = "Unknown"
             confidence = 0.0
-            
             if "predictions" in speciesnet_response and speciesnet_response["predictions"]:
-                # Get the first prediction (most likely species)
                 pred = speciesnet_response["predictions"][0]
                 species = pred.get("prediction", "Unknown")
                 confidence = pred.get("prediction_score", 0.0)
             elif "species" in speciesnet_response:
-                # Alternative response format
                 species = speciesnet_response.get("species", "Unknown")
                 confidence = speciesnet_response.get("confidence", 0.0)
-            
-            # Archive the photo if it's not "Unknown"
             archived_path = self.archive_photo(photo_info['file_path'], species, camera_id)
-            
-            # Create detection record
             detection_data = {
                 "camera_id": camera_id,
                 "timestamp": datetime.now(),
                 "species": species,
                 "confidence": confidence,
-                "image_path": archived_path,  # Use archived path if available
-                "detections_json": str(speciesnet_response)
+                "image_path": archived_path,
+                "detections_json": str(speciesnet_response),
+                "file_hash": file_hash
             }
-            
             db_detection = Detection(**detection_data)
             self.db.add(db_detection)
             self.db.commit()
             self.db.refresh(db_detection)
-            
-            # Mark as processed
-            self.processed_files.add(photo_info['file_id'])
-            
+            self.processed_hashes.add(file_hash)
             if species.lower() != "unknown":
                 print(f"Processed and archived photo: {photo_info['filename']} -> {detection_data['species']} ({detection_data['confidence']:.2f})")
             else:
                 print(f"Processed photo (not archived - unknown species): {photo_info['filename']} -> {detection_data['species']} ({detection_data['confidence']:.2f})")
-            
         except Exception as e:
             print(f"Error processing {photo_info['filename']}: {e}")
     
@@ -1510,51 +1549,26 @@ class PhotoScanner:
     async def scan_and_process(self):
         """Main scanning and processing function with intelligent rate limiting"""
         print("Starting photo scanner...")
-        
         try:
-            # First check if SpeciesNet server is healthy
             speciesnet_status = speciesnet_processor.get_status()
             if speciesnet_status != "running":
                 print(f"SpeciesNet server not healthy ({speciesnet_status}), skipping photo processing")
                 return
-            
-            # Load current processed files
             self.load_processed_files()
-            
-            # Scan for unprocessed photos
             unprocessed = self.scan_for_unprocessed_photos()
-            
             if unprocessed:
-                print(f"Found {len(unprocessed)} unprocessed photos")
-                
-                # Process only a very small number of photos per run to prevent overwhelming server
-                max_photos_per_run = 10  # Only process 10 photos per scan cycle
-                delay_between_photos = 5.0  # 5 seconds between each photo
-                
-                # Take only the first few photos
-                photos_to_process = unprocessed[:max_photos_per_run]
-                print(f"Processing {len(photos_to_process)} photos this cycle (max {max_photos_per_run})")
-                
-                for i, photo in enumerate(photos_to_process):
-                    print(f"Processing photo {i+1}/{len(photos_to_process)}: {photo['filename']}")
-                    
-                    # Check SpeciesNet health before each photo
+                print(f"[PhotoScanner] Processing {len(unprocessed)} photos this cycle (processing all)")
+                for i, photo in enumerate(unprocessed):
+                    print(f"[PhotoScanner] Processing photo {i+1}/{len(unprocessed)}: {photo['filename']}")
                     if speciesnet_processor.get_status() != "running":
                         print("SpeciesNet server became unhealthy, stopping processing")
                         break
-                    
                     await self.process_photo(photo)
-                    
-                    # Long delay between photos to be very gentle on the server
-                    if i < len(photos_to_process) - 1:  # Don't delay after the last photo
-                        print(f"Waiting {delay_between_photos} seconds before next photo...")
-                        await asyncio.sleep(delay_between_photos)
-                        
-                print(f"Completed processing {len(photos_to_process)} photos this cycle")
-                        
+                print(f"[PhotoScanner] Completed processing {len(unprocessed)} photos this cycle")
+                print("[PhotoScanner] Waiting 5 seconds after batch...")
+                await asyncio.sleep(5)
             else:
-                print("No unprocessed photos found")
-                
+                print("[PhotoScanner] No unprocessed photos found")
         except Exception as e:
             print(f"Photo scanner error: {e}")
 

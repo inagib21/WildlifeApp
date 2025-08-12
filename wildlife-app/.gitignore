@@ -40,5 +40,14 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-wildlife-app/motioneye_media/
-wildlife-app/backend/venv/
+# MotionEye media files
+motioneye_media/
+
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
