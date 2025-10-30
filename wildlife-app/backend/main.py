@@ -1238,18 +1238,6 @@ def get_camera_stream(camera_id: int, db: Session = Depends(get_db)):
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
     
-    # Special handling for Thingino cameras (ID 9 and 10)
-    if camera_id in [9, 10]:
-        return {
-            "camera_id": camera_id,
-            "camera_name": camera.name,
-            "rtsp_url": camera.url,
-            "stream_url": camera.url,  # Direct MJPEG stream
-            "mjpeg_url": camera.url,   # Direct MJPEG stream
-            "motioneye_url": "Direct MJPEG Stream",
-            "camera_type": "thingino"
-        }
-    
     return {
         "camera_id": camera_id,
         "camera_name": camera.name,
