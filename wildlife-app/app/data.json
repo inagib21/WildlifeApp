@@ -70,5 +70,23 @@
     "target": "25",
     "limit": "26",
     "reviewer": "System"
+  },
+  {
+    "id": 9,
+    "header": "Camera 9 - Thingino Camera",
+    "type": "MJPEG Stream",
+    "status": "Active",
+    "target": "0",
+    "limit": "0",
+    "reviewer": "System"
+  },
+  {
+    "id": 10,
+    "header": "Camera 10 - Thingino Camera 2",
+    "type": "MJPEG Stream",
+    "status": "Active",
+    "target": "0",
+    "limit": "0",
+    "reviewer": "System"
   }
 ] 

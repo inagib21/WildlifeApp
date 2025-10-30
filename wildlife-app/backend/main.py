@@ -388,7 +388,7 @@ class Detection(Base):
 # Create tables with explicit error logging
 try:
     Base.metadata.create_all(bind=engine)
-    # Print the list of tables after creation
+    # Print the list of tables after creation (PostgreSQL version)
     with engine.connect() as conn:
         result = conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';"))
         tables = [row[0] for row in result]
@@ -607,6 +607,7 @@ class DetectionCreate(DetectionBase):
 class DetectionResponse(DetectionBase):
     id: int
     timestamp: datetime
+    full_taxonomy: Optional[str] = None  # Add full taxonomy field
     media_url: Optional[str] = None
     camera_name: str
 
@@ -859,11 +860,24 @@ def get_detections(
         camera = cameras.get(detection.camera_id)
         camera_name = camera.name if camera else f"Camera {detection.camera_id}"
         
+        # Extract full taxonomy from detections_json if available
+        full_taxonomy = None
+        if detection.detections_json:
+            try:
+                detections_data = json.loads(detection.detections_json)
+                if "predictions" in detections_data and detections_data["predictions"]:
+                    full_taxonomy = detections_data["predictions"][0].get("prediction", detection.species)
+                elif "species" in detections_data:
+                    full_taxonomy = detections_data["species"]
+            except:
+                full_taxonomy = detection.species
+        
         detection_dict = {
             "id": detection.id,
             "camera_id": detection.camera_id,
             "timestamp": detection.timestamp,
             "species": detection.species,
+            "full_taxonomy": full_taxonomy,  # Add full taxonomy information
             "confidence": detection.confidence,
             "image_path": detection.image_path,
             "file_size": detection.file_size,
@@ -892,15 +906,16 @@ def get_detections(
                         detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
                 elif "archived_photos" in parts:
                     idx = parts.index("archived_photos")
-                    if len(parts) > idx + 4:
+                    if len(parts) > idx + 3:
                         # archived_photos/common_name/camera/date/filename
-                        camera_folder = parts[idx + 2]  # 1 or Camera1
-                        date_folder = parts[idx + 3]    # 2025-07-15
-                        filename = parts[idx + 4]       # 11-00-07.jpg
-                        # Use CameraX format for consistency
-                        if not str(camera_folder).startswith("Camera"):
-                            camera_folder = f"Camera{camera_folder}"
-                        detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
+                        species_name = parts[idx + 1]    # human, vehicle, etc.
+                        camera_folder = parts[idx + 2]   # 1, 2, etc.
+                        date_folder = parts[idx + 3]    # 2025-08-11
+                        filename = parts[idx + 4]        # 13-08-44.jpg
+                        
+                        # Keep the original camera folder name (don't add "Camera" prefix)
+                        # This matches the actual file structure: archived_photos/human/2/2025-08-11/13-08-44.jpg
+                        detection_dict["media_url"] = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
             except Exception as e:
                 print(f"Error generating media_url for detection {detection.id}: {e}")
                 detection_dict["media_url"] = None
@@ -973,6 +988,249 @@ async def process_image_with_speciesnet(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/thingino/capture")
+async def capture_thingino_image(camera_id: int, db: Session = Depends(get_db)):
+    """Capture an image from the Thingino camera and process it"""
+    try:
+        # Get camera information
+        camera = db.query(Camera).filter(Camera.id == camera_id).first()
+        if not camera:
+            raise HTTPException(status_code=404, detail="Camera not found")
+        
+        if camera_id not in [9, 10]:
+            raise HTTPException(status_code=400, detail="This endpoint is only for Thingino cameras")
+        
+        # Download image from Thingino camera
+        import requests
+        from datetime import datetime
+        
+        try:
+            # Try to get image from camera with authentication for Thingino cameras
+            auth = None
+            if camera_id in [9, 10]:  # Thingino cameras
+                auth = ("root", "ismart12")
+            
+            response = requests.get(camera.url, auth=auth, timeout=10)
+            if response.status_code != 200:
+                raise HTTPException(status_code=500, detail=f"Failed to capture image: HTTP {response.status_code}")
+            
+            # Save image temporarily
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"thingino_capture_{timestamp}.jpg"
+            temp_path = os.path.join(tempfile.gettempdir(), filename)
+            
+            with open(temp_path, 'wb') as f:
+                f.write(response.content)
+            
+            # Process with SpeciesNet
+            predictions = speciesnet_processor.process_image(temp_path)
+            
+            if "error" in predictions:
+                raise HTTPException(status_code=500, detail=predictions["error"])
+            
+            # Extract species prediction
+            species = "Unknown"
+            confidence = 0.0
+            
+            if "predictions" in predictions and predictions["predictions"]:
+                pred = predictions["predictions"][0]
+                species = pred.get("prediction", "Unknown")
+                confidence = pred.get("prediction_score", 0.0)
+            
+            # Save detection to database
+            detection_data = {
+                "camera_id": camera_id,
+                "timestamp": datetime.now(),
+                "species": species,
+                "confidence": confidence,
+                "image_path": temp_path,
+                "detections_json": json.dumps(predictions),
+                "prediction_score": confidence
+            }
+            
+            db_detection = Detection(**detection_data)
+            db.add(db_detection)
+            db.commit()
+            db.refresh(db_detection)
+            
+            # Broadcast the new detection to connected clients
+            detection_event = {
+                "id": db_detection.id,
+                "camera_id": camera_id,
+                "camera_name": camera.name,
+                "species": species,
+                "confidence": confidence,
+                "image_path": temp_path,
+                "timestamp": db_detection.timestamp.isoformat(),
+                "media_url": f"/api/thingino/image/{db_detection.id}"
+            }
+            await event_manager.broadcast_detection(detection_event)
+            
+            return {
+                "status": "success",
+                "detection_id": db_detection.id,
+                "camera_id": camera_id,
+                "camera_name": camera.name,
+                "species": species,
+                "confidence": confidence,
+                "predictions": predictions
+            }
+            
+        except requests.exceptions.RequestException as e:
+            raise HTTPException(status_code=500, detail=f"Failed to connect to camera: {str(e)}")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/thingino/image/{detection_id}")
+def get_thingino_image(detection_id: int, db: Session = Depends(get_db)):
+    """Get captured image from Thingino camera"""
+    detection = db.query(Detection).filter(Detection.id == detection_id).first()
+    if not detection:
+        raise HTTPException(status_code=404, detail="Detection not found")
+    
+    if not os.path.exists(detection.image_path):
+        raise HTTPException(status_code=404, detail="Image file not found")
+    
+    return FileResponse(detection.image_path, media_type="image/jpeg")
+
+@app.post("/api/thingino/webhook")
+async def thingino_webhook(request: Request, db: Session = Depends(get_db)):
+    """Handle webhook notifications from Thingino camera for motion detection"""
+    try:
+        # Get the JSON data from Thingino
+        data = await request.json()
+        
+        print(f"Thingino webhook received: {data}")
+        
+        # Thingino sends data with these typical fields:
+        # - camera_id: ID of the camera (we'll determine from image_url)
+        # - message: Motion detection message
+        # - timestamp: When the event occurred
+        # - image_url: URL to the captured image
+        
+        message = data.get("message", "Motion detected")
+        timestamp = data.get("timestamp", datetime.now().isoformat())
+        image_url = data.get("image_url", "http://192.168.88.93/x/preview.cgi")
+        
+        # Determine camera ID based on the image URL
+        if "192.168.88.97" in image_url:
+            camera_id = 10  # Thingino Camera 2
+        else:
+            camera_id = 9   # Thingino Camera 1 (default)
+        
+        print(f"Processing Thingino motion detection: {message}")
+        
+        # Process detection inline (will take a few seconds but ensures it completes)
+        print(f"[THINGINO] Processing detection for camera {camera_id}, URL: {image_url}")
+        
+        try:
+            # Use authentication for Thingino cameras
+            auth = None
+            if "192.168.88.93" in image_url or "192.168.88.97" in image_url:
+                auth = ("root", "ismart12")
+            
+            response = requests.get(image_url, auth=auth, timeout=15)
+            if response.status_code != 200:
+                print(f"Failed to download image from Thingino: HTTP {response.status_code}")
+                return {"status": "error", "message": f"Failed to download image: HTTP {response.status_code}"}
+            
+            # Save image temporarily
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"thingino_motion_{timestamp_str}.jpg"
+            temp_path = os.path.join(tempfile.gettempdir(), filename)
+            
+            with open(temp_path, 'wb') as f:
+                f.write(response.content)
+            
+            print(f"Image saved to: {temp_path}")
+            
+            # Process with SpeciesNet
+            predictions = speciesnet_processor.process_image(temp_path)
+            
+            if "error" in predictions:
+                print(f"SpeciesNet processing error: {predictions['error']}")
+                # Still save the detection, but mark as unprocessed
+                detection_data = {
+                    "camera_id": camera_id,
+                    "timestamp": datetime.now(),
+                    "species": "Unknown",
+                    "confidence": 0.0,
+                    "image_path": temp_path,
+                    "detections_json": json.dumps({"error": predictions["error"]}),
+                    "prediction_score": 0.0
+                }
+            else:
+                # Extract species prediction
+                species = "Unknown"
+                confidence = 0.0
+                
+                if "predictions" in predictions and predictions["predictions"]:
+                    pred = predictions["predictions"][0]
+                    species = pred.get("prediction", "Unknown")
+                    confidence = pred.get("prediction_score", 0.0)
+                
+                # Save detection to database
+                detection_data = {
+                    "camera_id": camera_id,
+                    "timestamp": datetime.now(),
+                    "species": species,
+                    "confidence": confidence,
+                    "image_path": temp_path,
+                    "detections_json": json.dumps(predictions),
+                    "prediction_score": confidence
+                }
+            
+            # Create detection record
+            db_detection = Detection(**detection_data)
+            db.add(db_detection)
+            db.commit()
+            db.refresh(db_detection)
+            
+            print(f"Detection saved: ID={db_detection.id}, Species={detection_data['species']}, Confidence={detection_data['confidence']}")
+            
+            # Get camera information for broadcasting
+            camera_info = db.query(Camera).filter(Camera.id == camera_id).first()
+            camera_name = camera_info.name if camera_info else "Thingino Camera"
+            
+            # Broadcast the new detection to connected clients
+            detection_event = {
+                "type": "detection",
+                "detection": {
+                    "id": db_detection.id,
+                    "camera_id": camera_id,
+                    "camera_name": camera_name,
+                    "species": detection_data["species"],
+                    "confidence": detection_data["confidence"],
+                    "image_path": temp_path,
+                    "timestamp": db_detection.timestamp.isoformat(),
+                    "media_url": f"/api/thingino/image/{db_detection.id}"
+                }
+            }
+            # Use asyncio to call the async broadcast
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(event_manager.broadcast_detection(detection_event))
+            except RuntimeError:
+                asyncio.run(event_manager.broadcast_detection(detection_event))
+            
+        except Exception as e:
+            import traceback
+            print(f"ERROR processing detection: {e}")
+            traceback.print_exc()
+            return {"status": "error", "message": str(e)}
+        
+        # Return success response
+        return {
+            "status": "success",
+            "message": "Motion detection processed successfully"
+        }
+        
+    except Exception as e:
+        print(f"Error processing Thingino webhook: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
 @app.get("/stream/{camera_id}")
 def get_camera_stream(camera_id: int, db: Session = Depends(get_db)):
     """Get camera stream information"""
@@ -980,13 +1238,26 @@ def get_camera_stream(camera_id: int, db: Session = Depends(get_db)):
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found")
     
+    # Special handling for Thingino cameras (ID 9 and 10)
+    if camera_id in [9, 10]:
+        return {
+            "camera_id": camera_id,
+            "camera_name": camera.name,
+            "rtsp_url": camera.url,
+            "stream_url": camera.url,  # Direct MJPEG stream
+            "mjpeg_url": camera.url,   # Direct MJPEG stream
+            "motioneye_url": "Direct MJPEG Stream",
+            "camera_type": "thingino"
+        }
+    
     return {
         "camera_id": camera_id,
         "camera_name": camera.name,
         "rtsp_url": camera.url,
         "stream_url": motioneye_client.get_camera_stream_url(camera_id),
         "mjpeg_url": motioneye_client.get_camera_mjpeg_url(camera_id),
-        "motioneye_url": MOTIONEYE_URL
+        "motioneye_url": MOTIONEYE_URL,
+        "camera_type": "motioneye"
     }
 
 @app.post("/api/motioneye/webhook")
@@ -1116,16 +1387,36 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
                         if "confidence" in key.lower() and isinstance(value, (int, float)):
                             confidence = value
             
-            # Clean up species name - extract common name from taxonomy
+            # Clean up species name - extract meaningful information from taxonomy
             if species and ";" in species:
-                # Take the last part after semicolons (common name)
-                species = species.split(";")[-1].title()
+                parts = species.split(";")
+                # Remove UUID if present (first part if it's very long)
+                if len(parts[0]) > 20:  # Likely a UUID
+                    parts = parts[1:]
+                
+                if len(parts) >= 3:
+                    # Use genus and species if available (e.g., "Homo sapiens")
+                    if parts[-2] and parts[-1]:
+                        species = f"{parts[-2].title()} {parts[-1].title()}"
+                    else:
+                        species = parts[-1].title()
+                elif len(parts) >= 2:
+                    # Use family and genus if available (e.g., "Hominidae Homo")
+                    species = f"{parts[-2].title()} {parts[-1].title()}"
+                else:
+                    # Fallback to last part
+                    species = parts[-1].title()
             elif species and species != "Unknown":
                 # If it's a UUID or complex format, try to extract meaningful part
                 if len(species) > 50:  # Likely a complex taxonomy string
                     parts = species.split(";")
                     if len(parts) > 1:
-                        species = parts[-1].title()  # Use last part
+                        # Remove UUID and use meaningful parts
+                        meaningful_parts = [p for p in parts if len(p) < 20 and p.strip()]
+                        if meaningful_parts:
+                            species = " ".join(meaningful_parts[-2:]).title()
+                        else:
+                            species = "Unknown"
                     else:
                         species = "Unknown"
             
@@ -1355,7 +1646,7 @@ def analytics_detections_unique_species_count(
     """Return the number of unique species detected in the last N days."""
     sql = f"""
         SELECT COUNT(DISTINCT species) as unique_species
-        FROM detections_iceberg
+        FROM detections
         WHERE timestamp >= NOW() - INTERVAL '{days} days'
     """
     with engine.connect() as conn:
@@ -1596,6 +1887,184 @@ async def run_photo_scanner():
         print("Photo scanner sleeping for 15 minutes...")
         await asyncio.sleep(900)  # 15 minutes
 
+@app.get("/media/{camera}/{date}/{filename}")
+def serve_motioneye_media(camera: str, date: str, filename: str):
+    """Serve motioneye media files"""
+    try:
+        # Construct the file path
+        file_path = os.path.join("motioneye_media", camera, date, filename)
+        
+        # Security check: ensure the path is within the allowed directory
+        if not os.path.abspath(file_path).startswith(os.path.abspath("motioneye_media")):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Return the file
+        return FileResponse(file_path, media_type="image/jpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error serving file: {str(e)}")
+
+@app.get("/archived_photos/{species}/{camera}/{date}/{filename}")
+def serve_archived_photo(species: str, camera: str, date: str, filename: str):
+    """Serve archived photos from the archived_photos directory"""
+    try:
+        # Get the current working directory (where the backend is running)
+        current_dir = os.getcwd()
+        
+        # Construct the file path relative to the current directory
+        file_path = os.path.join(current_dir, "archived_photos", species, camera, date, filename)
+        
+        # Debug logging
+        print(f"Requested file: /archived_photos/{species}/{camera}/{date}/{filename}")
+        print(f"Looking for file at: {file_path}")
+        print(f"File exists: {os.path.exists(file_path)}")
+        
+        # Security check: ensure the path is within the allowed directory
+        if not os.path.abspath(file_path).startswith(os.path.abspath(os.path.join(current_dir, "archived_photos"))):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            # Try alternative path structure
+            alt_path = os.path.join(current_dir, "..", "archived_photos", species, camera, date, filename)
+            print(f"Trying alternative path: {alt_path}")
+            print(f"Alternative path exists: {os.path.exists(alt_path)}")
+            
+            if os.path.exists(alt_path):
+                file_path = alt_path
+            else:
+                raise HTTPException(status_code=404, detail=f"File not found at {file_path} or {alt_path}")
+        
+        # Return the file
+        return FileResponse(file_path, media_type="image/jpeg")
+    except Exception as e:
+        print(f"Error serving archived photo: {e}")
+        raise HTTPException(status_code=500, detail=f"Error serving file: {str(e)}")
+
+@app.get("/api/debug/speciesnet-response/{detection_id}")
+def debug_speciesnet_response(detection_id: int, db: Session = Depends(get_db)):
+    """Debug endpoint to see raw SpeciesNet response for a detection"""
+    detection = db.query(Detection).filter(Detection.id == detection_id).first()
+    if not detection:
+        raise HTTPException(status_code=404, detail="Detection not found")
+    
+    try:
+        detections_json = json.loads(detection.detections_json) if detection.detections_json else {}
+        return {
+            "id": detection.id,
+            "species": detection.species,
+            "confidence": detection.confidence,
+            "raw_speciesnet_response": detections_json,
+            "image_path": detection.image_path
+        }
+    except Exception as e:
+        return {
+            "id": detection.id,
+            "species": detection.species,
+            "confidence": detection.confidence,
+            "error": str(e),
+            "raw_detections_json": detection.detections_json
+        }
+
+@app.get("/api/debug/detection-media/{detection_id}")
+def debug_detection_media(detection_id: int, db: Session = Depends(get_db)):
+    """Debug endpoint to see media URL generation for a detection"""
+    detection = db.query(Detection).filter(Detection.id == detection_id).first()
+    if not detection:
+        raise HTTPException(status_code=404, detail="Detection not found")
+    
+    try:
+        # Generate media URL using the same logic as the main endpoint
+        media_url = None
+        if detection.image_path:
+            path = detection.image_path.replace("\\", "/")
+            parts = path.split("/")
+            
+            if "motioneye_media" in parts:
+                idx = parts.index("motioneye_media")
+                if len(parts) > idx + 3:
+                    camera_folder = parts[idx + 1]
+                    date_folder = parts[idx + 2]
+                    filename = parts[idx + 3]
+                    media_url = f"/media/{camera_folder}/{date_folder}/{filename}"
+            elif "archived_photos" in parts:
+                idx = parts.index("archived_photos")
+                if len(parts) > idx + 3:
+                    species_name = parts[idx + 1]
+                    camera_folder = parts[idx + 2]
+                    date_folder = parts[idx + 3]
+                    filename = parts[idx + 4]
+                    # Don't add Camera prefix - keep original structure
+                    media_url = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+        
+        return {
+            "id": detection.id,
+            "image_path": detection.image_path,
+            "generated_media_url": media_url,
+            "path_parts": parts if detection.image_path else None,
+            "file_exists": os.path.exists(detection.image_path) if detection.image_path else False
+        }
+    except Exception as e:
+        return {
+            "id": detection.id,
+            "error": str(e),
+            "image_path": detection.image_path
+        }
+
+@app.get("/api/debug/file-system")
+def debug_file_system():
+    """Debug endpoint to check file system structure"""
+    try:
+        current_dir = os.getcwd()
+        
+        # Check if archived_photos directory exists
+        archived_photos_path = os.path.join(current_dir, "archived_photos")
+        archived_photos_exists = os.path.exists(archived_photos_path)
+        
+        # Check if motioneye_media directory exists
+        motioneye_media_path = os.path.join(current_dir, "motioneye_media")
+        motioneye_media_exists = os.path.exists(motioneye_media_path)
+        
+        # List contents of archived_photos if it exists
+        archived_contents = []
+        if archived_photos_exists:
+            try:
+                for species in os.listdir(archived_photos_path):
+                    species_path = os.path.join(archived_photos_path, species)
+                    if os.path.isdir(species_path):
+                        cameras = []
+                        for camera in os.listdir(species_path):
+                            camera_path = os.path.join(species_path, camera)
+                            if os.path.isdir(camera_path):
+                                dates = []
+                                for date in os.listdir(camera_path):
+                                    date_path = os.path.join(camera_path, date)
+                                    if os.path.isdir(date_path):
+                                        files = os.listdir(date_path)
+                                        dates.append({"date": date, "file_count": len(files)})
+                                cameras.append({"camera": camera, "dates": dates})
+                        archived_contents.append({"species": species, "cameras": cameras})
+            except Exception as e:
+                archived_contents = [{"error": str(e)}]
+        
+        return {
+            "current_working_directory": current_dir,
+            "archived_photos": {
+                "exists": archived_photos_exists,
+                "path": archived_photos_path,
+                "contents": archived_contents
+            },
+            "motioneye_media": {
+                "exists": motioneye_media_exists,
+                "path": motioneye_media_path
+            }
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/api/trigger-photo-scan")
 async def trigger_photo_scan():
     """Manually trigger photo scanner to process unprocessed photos"""
@@ -1663,10 +2132,12 @@ def analytics_detections_timeseries(
     """Return detection counts grouped by hour or day for the last N days."""
     if interval not in ("hour", "day"):
         return JSONResponse(status_code=400, content={"error": "Invalid interval. Use 'hour' or 'day'."})
-    group_expr = "date_trunc('{}', timestamp)".format(interval)
+    
+    group_expr = f"date_trunc('{interval}', timestamp)"
+    
     sql = f"""
         SELECT {group_expr} as bucket, COUNT(*) as count
-        FROM detections_iceberg
+        FROM detections
         WHERE timestamp >= NOW() - INTERVAL '{days} days'
         GROUP BY bucket
         ORDER BY bucket ASC
@@ -1684,7 +2155,7 @@ def analytics_detections_top_species(
     """Return the top N species detected in the last N days."""
     sql = f"""
         SELECT species, COUNT(*) as count
-        FROM detections_iceberg
+        FROM detections
         WHERE timestamp >= NOW() - INTERVAL '{days} days'
         GROUP BY species
         ORDER BY count DESC
@@ -1702,7 +2173,7 @@ def analytics_detections_unique_species_count(
     """Return the number of unique species detected in the last N days."""
     sql = f"""
         SELECT COUNT(DISTINCT species) as unique_species
-        FROM detections_iceberg
+        FROM detections
         WHERE timestamp >= NOW() - INTERVAL '{days} days'
     """
     with engine.connect() as conn:

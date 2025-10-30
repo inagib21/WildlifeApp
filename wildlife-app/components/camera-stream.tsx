@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
+import { ThinginoCameraStream } from "./thingino-camera-stream"
 
 interface CameraStreamProps {
   cameraId: string
@@ -22,6 +23,31 @@ export function CameraStream({ cameraId, title, width = 640, height = 480 }: Cam
   if (isNaN(numericId)) {
     console.warn(`CameraStream: cameraId '${cameraId}' is not a valid number.`);
     return <div className="text-red-500">Invalid camera ID</div>;
+  }
+  
+  // Check if this is a Thingino camera (ID 9 or 10)
+  if (numericId === 9) {
+    return (
+      <ThinginoCameraStream
+        cameraId={cameraId}
+        title={title}
+        width={width}
+        height={height}
+        streamUrl="http://192.168.88.93/x/preview.cgi"
+      />
+    );
+  }
+  
+  if (numericId === 10) {
+    return (
+      <ThinginoCameraStream
+        cameraId={cameraId}
+        title={title}
+        width={width}
+        height={height}
+        streamUrl="http://192.168.88.97/x/preview.cgi"
+      />
+    );
   }
   
   // Get stream information from our backend
@@ -50,10 +76,14 @@ export function CameraStream({ cameraId, title, width = 640, height = 480 }: Cam
 
   return (
     <Card className="w-full">
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
+      <CardHeader className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20">
+        <CardTitle className="flex items-center gap-2">
+          <span className="text-blue-600">📷</span>
+          {title}
+        </CardTitle>
         {streamInfo && (
-          <div className="text-sm text-muted-foreground">
+          <div className="text-sm text-muted-foreground flex items-center gap-2">
+            <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
             MotionEye: {streamInfo.motioneye_url}
           </div>
         )}

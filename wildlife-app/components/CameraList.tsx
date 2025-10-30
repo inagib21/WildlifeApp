@@ -62,23 +62,102 @@ const CameraList: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold">Cameras</h1>
-        <Dialog>
-          <DialogTrigger asChild>
-            <Button>Add Camera</Button>
-          </DialogTrigger>
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+            Camera Dashboard
+          </h1>
+          <p className="text-muted-foreground mt-2">
+            Monitor and manage your wildlife cameras
+          </p>
+          <div className="flex items-center gap-4 mt-3 text-sm">
+            <span className="flex items-center gap-2">
+              <span className="w-3 h-3 bg-green-500 rounded-full"></span>
+              {cameras.filter(c => c.is_active).length} Active
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="w-3 h-3 bg-gray-400 rounded-full"></span>
+              {cameras.filter(c => !c.is_active).length} Inactive
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="w-3 h-3 bg-blue-500 rounded-full"></span>
+              {cameras.filter(c => c.id >= 9).length} Thingino
+            </span>
+          </div>
+        </div>
+        <div className="flex gap-3">
+          <Button 
+            variant="outline" 
+            onClick={fetchCameras}
+            className="flex items-center gap-2"
+          >
+            🔄 Refresh
+          </Button>
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700">
+                📷 Add Camera
+              </Button>
+            </DialogTrigger>
           <DialogContent className="sm:max-w-[600px]">
             <DialogHeader>
               <DialogTitle>Add New Camera</DialogTitle>
               <DialogDescription>
-                Add a new RTSP camera to your wildlife monitoring system.
+                Add a new camera to your wildlife monitoring system. Supports RTSP cameras and Thingino devices.
               </DialogDescription>
             </DialogHeader>
             <CameraForm onSuccess={fetchCameras} />
           </DialogContent>
         </Dialog>
+        </div>
       </div>
+
+      {/* Camera Stats Cards */}
+      {cameras.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Card className="bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/20 dark:to-emerald-950/20">
+            <CardContent className="p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-green-600 dark:text-green-400">Active Cameras</p>
+                  <p className="text-3xl font-bold text-green-700 dark:text-green-300">
+                    {cameras.filter(c => c.is_active).length}
+                  </p>
+                </div>
+                <div className="text-4xl">📷</div>
+              </div>
+            </CardContent>
+          </Card>
+          
+          <Card className="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20">
+            <CardContent className="p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-blue-600 dark:text-blue-400">Thingino Cameras</p>
+                  <p className="text-3xl font-bold text-blue-700 dark:text-blue-300">
+                    {cameras.filter(c => c.id >= 9).length}
+                  </p>
+                </div>
+                <div className="text-4xl">📹</div>
+              </div>
+            </CardContent>
+          </Card>
+          
+          <Card className="bg-gradient-to-br from-purple-50 to-violet-50 dark:from-purple-950/20 dark:to-violet-950/20">
+            <CardContent className="p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-purple-600 dark:text-purple-400">MotionEye Cameras</p>
+                  <p className="text-3xl font-bold text-purple-700 dark:text-purple-300">
+                    {cameras.filter(c => c.id < 9).length}
+                  </p>
+                </div>
+                <div className="text-4xl">🎥</div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {cameras.length === 0 ? (
         <Card>
@@ -104,39 +183,69 @@ const CameraList: React.FC = () => {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3 gap-8">
           {cameras.map((camera) => (
-            <Card key={camera.id} className="overflow-hidden">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-xl font-bold">{camera.name}</CardTitle>
-                <Badge variant={camera.is_active ? "default" : "destructive"}>
-                  {camera.is_active ? "Active" : "Inactive"}
-                </Badge>
+            <Card key={camera.id} className="overflow-hidden shadow-lg hover:shadow-xl transition-shadow">
+              <CardHeader className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20">
+                <div className="flex flex-row items-center justify-between space-y-0 pb-2">
+                  <div>
+                    <CardTitle className="text-xl font-bold text-gray-900 dark:text-gray-100">
+                      {camera.name}
+                    </CardTitle>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Camera ID: {camera.id}
+                    </p>
+                  </div>
+                  <Badge 
+                    variant={camera.is_active ? "default" : "destructive"}
+                    className="text-xs px-3 py-1"
+                  >
+                    {camera.is_active ? "🟢 Active" : "🔴 Inactive"}
+                  </Badge>
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  <p>URL: {camera.url}</p>
+                  <p>Added: {new Date(camera.created_at).toLocaleDateString()}</p>
+                </div>
               </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  <CameraStream
-                    cameraId={camera.id.toString()}
-                    title={camera.name}
-                    width={640}
-                    height={480}
-                  />
-                  <div className="flex justify-between items-center">
+              <CardContent className="p-6">
+                <div className="space-y-6">
+                  {/* Camera Stream */}
+                  <div className="border rounded-lg overflow-hidden bg-gray-50 dark:bg-gray-900">
+                    <CameraStream
+                      cameraId={camera.id.toString()}
+                      title={camera.name}
+                      width={640}
+                      height={480}
+                    />
+                  </div>
+                  
+                  {/* Camera Actions */}
+                  <div className="flex flex-col sm:flex-row gap-3">
                     <Button
                       variant="outline"
+                      className="flex-1"
                       onClick={() => {
                         setSelectedCamera(camera);
                         setIsConfigOpen(true);
                       }}
                     >
-                      Configure
+                      ⚙️ Configure
                     </Button>
                     <Button
                       variant="destructive"
+                      className="flex-1"
                       onClick={() => handleRemoveCamera(camera.id)}
                     >
-                      Remove
+                      🗑️ Remove
                     </Button>
+                  </div>
+                  
+                  {/* Camera Type Indicator */}
+                  <div className="text-center">
+                    <Badge variant="secondary" className="text-xs">
+                      {camera.id >= 9 ? "Thingino Camera" : "MotionEye Camera"}
+                    </Badge>
                   </div>
                 </div>
               </CardContent>

@@ -9,6 +9,45 @@ import { Badge } from "@/components/ui/badge"
 import Image from "next/image"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose } from "@/components/ui/dialog"
 
+// Utility function to generate media URL from image path
+function generateMediaUrl(imagePath: string): string {
+  if (!imagePath) return "/file.svg"
+  
+  try {
+    // Normalize path for both Windows and Linux
+    const path = imagePath.replace(/\\/g, "/")
+    const parts = path.split("/")
+    
+    // Look for motioneye_media/CameraX/date/filename
+    if (path.includes("motioneye_media")) {
+      const idx = parts.indexOf("motioneye_media")
+      if (parts.length > idx + 3) {
+        const camera = parts[idx + 1]
+        const date = parts[idx + 2]
+        const filename = parts[idx + 3]
+        return `/media/${camera}/${date}/${filename}`
+      }
+    }
+    
+    // Look for archived_photos/species/camera/date/filename
+    if (path.includes("archived_photos")) {
+      const idx = parts.indexOf("archived_photos")
+      if (parts.length > idx + 4) {
+        const species = parts[idx + 1]
+        const camera = parts[idx + 2]
+        const date = parts[idx + 3]
+        const filename = parts[idx + 4]
+        return `/archived_photos/${species}/${camera}/${date}/${filename}`
+      }
+    }
+    
+    return "/file.svg"
+  } catch (error) {
+    console.error("Error generating media URL:", error)
+    return "/file.svg"
+  }
+}
+
 const PAGE_SIZE = 12
 
 export function DetectionsList() {
@@ -31,6 +70,46 @@ export function DetectionsList() {
       setLoading(false)
     }
     fetchPage()
+  }, [page])
+
+  // Subscribe to real-time detection updates via SSE
+  React.useEffect(() => {
+    const eventSource = new EventSource(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}/events/detections`)
+    
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      console.log('New detection received:', data)
+      
+      // Skip keepalive messages
+      if (data.type === 'keepalive') {
+        return
+      }
+      
+      // Handle detection events
+      if (data.type === 'detection' && data.detection) {
+        const newDetection = data.detection
+        
+        // Add the new detection to the list if we're on the first page
+        if (page === 0) {
+          setDetections((prev) => [newDetection, ...prev].slice(0, PAGE_SIZE))
+        }
+        
+        // Update the total count
+        setTotalCount((prev) => prev + 1)
+        
+        // Show notification
+        console.log(`New detection: ${newDetection.species} from Camera ${newDetection.camera_id}`)
+      }
+    }
+    
+    eventSource.onerror = (error) => {
+      console.error('SSE error:', error)
+      // EventSource will auto-reconnect
+    }
+    
+    return () => {
+      eventSource.close()
+    }
   }, [page])
 
   const pageCount = Math.ceil(totalCount / PAGE_SIZE)
@@ -110,7 +189,22 @@ export function DetectionsList() {
               </TableRow>
             ) : (
               sortedDetections.map((detection) => {
-                const validImageUrl = (detection.media_url && (detection.media_url.startsWith("/") || detection.media_url.startsWith("http"))) ? detection.media_url : "/file.svg"
+                // Debug logging to see what we're getting
+                console.log(`Detection ${detection.id}:`, {
+                  media_url: detection.media_url,
+                  image_path: detection.image_path,
+                  species: detection.species
+                })
+                
+                // Use backend media_url if available, otherwise generate from image_path
+                let validImageUrl = detection.media_url && (detection.media_url.startsWith("/") || detection.media_url.startsWith("http")) 
+                  ? detection.media_url 
+                  : generateMediaUrl(detection.image_path)
+                
+                // If media_url starts with "/", prepend the backend URL
+                if (validImageUrl && validImageUrl.startsWith("/") && !validImageUrl.startsWith("http")) {
+                  validImageUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}${validImageUrl}`
+                }
                 const commonName = detection.species && detection.species.includes(';') ? detection.species.split(';').pop()?.trim() : detection.species
                 return (
                   <TableRow key={detection.id}>
@@ -120,7 +214,16 @@ export function DetectionsList() {
                       </div>
                     </TableCell>
                     <TableCell>{new Date(detection.timestamp).toLocaleString()}</TableCell>
-                    <TableCell>{commonName}</TableCell>
+                    <TableCell>
+                      <div className="group relative">
+                        <span>{commonName}</span>
+                        {detection.full_taxonomy && detection.full_taxonomy !== detection.species && (
+                          <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block bg-black text-white text-xs rounded px-2 py-1 whitespace-nowrap z-10">
+                            {detection.full_taxonomy}
+                          </div>
+                        )}
+                      </div>
+                    </TableCell>
                     <TableCell><Badge>{Math.round(detection.confidence * 100)}%</Badge></TableCell>
                     <TableCell>{detection.camera_name || detection.camera_id}</TableCell>
                     <TableCell>
@@ -151,19 +254,33 @@ export function DetectionsList() {
               <DialogHeader>
                 <DialogTitle>Detection #{selectedDetection.id}</DialogTitle>
                 <DialogDescription>
-                  <div className="mb-2">{new Date(selectedDetection.timestamp).toLocaleString()}</div>
+                  Detection captured on {new Date(selectedDetection.timestamp).toLocaleString()}
                 </DialogDescription>
               </DialogHeader>
               <div className="relative w-full h-64 mb-4">
-                <Image src={(selectedDetection.media_url && (selectedDetection.media_url.startsWith("/") || selectedDetection.media_url.startsWith("http"))) ? selectedDetection.media_url : "/file.svg"} alt={`Detection ${selectedDetection.id}`} fill className="object-contain rounded" />
+                <Image 
+                  src={(selectedDetection.media_url && (selectedDetection.media_url.startsWith("/") || selectedDetection.media_url.startsWith("http")) 
+                    ? (selectedDetection.media_url.startsWith("/") 
+                        ? `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}${selectedDetection.media_url}` 
+                        : selectedDetection.media_url)
+                    : generateMediaUrl(selectedDetection.image_path))}
+                  alt={`Detection ${selectedDetection.id}`} 
+                  fill 
+                  className="object-contain rounded" 
+                />
               </div>
               <div className="space-y-2 text-sm">
                 <div><b>Species:</b> {selectedDetection.species}</div>
+                {selectedDetection.full_taxonomy && selectedDetection.full_taxonomy !== selectedDetection.species && (
+                  <div><b>Full Taxonomy:</b> <span className="text-xs text-muted-foreground">{selectedDetection.full_taxonomy}</span></div>
+                )}
                 <div><b>Confidence:</b> {Math.round(selectedDetection.confidence * 100)}%</div>
                 <div><b>Camera:</b> {selectedDetection.camera_name || selectedDetection.camera_id}</div>
                 <div><b>File size:</b> {selectedDetection.file_size ? `${selectedDetection.file_size} bytes` : 'N/A'}</div>
                 <div><b>Dimensions:</b> {selectedDetection.image_width && selectedDetection.image_height ? `${selectedDetection.image_width}x${selectedDetection.image_height}` : 'N/A'}</div>
                 <div><b>Image path:</b> {selectedDetection.image_path}</div>
+                <div><b>Backend media_url:</b> {selectedDetection.media_url || 'None'}</div>
+                <div><b>Generated media_url:</b> {generateMediaUrl(selectedDetection.image_path)}</div>
               </div>
               <div className="flex justify-end mt-4">
                 <DialogClose asChild>

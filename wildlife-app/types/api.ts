@@ -11,6 +11,7 @@ export interface Detection {
   camera_id: number
   timestamp: string
   species: string
+  full_taxonomy?: string  // Add full taxonomy information
   confidence: number
   image_path: string
   media_url?: string
