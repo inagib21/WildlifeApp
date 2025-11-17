@@ -35,6 +35,17 @@ from pathlib import Path
 import aiofiles
 from hashlib import sha256
 
+try:
+    from .camera_sync import CameraSyncService, sync_motioneye_cameras
+    from .logging_utils import configure_access_logs
+    from .motioneye_events import should_process_event
+    from .motioneye_webhook import parse_motioneye_payload
+except ImportError:  # pragma: no cover - fallback for direct execution
+    from camera_sync import CameraSyncService, sync_motioneye_cameras
+    from logging_utils import configure_access_logs
+    from motioneye_events import should_process_event
+    from motioneye_webhook import parse_motioneye_payload
+
 load_dotenv()
 
 # Configure logging
@@ -42,6 +53,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+configure_access_logs()
 
 app = FastAPI()
 
@@ -252,7 +265,7 @@ class SpeciesNetProcessor:
                 response = self.session.post(
                     f"{self.server_url}/predict",
                     files=files,
-                    timeout=(1, 1)  # 1s connect, 1s read
+                    timeout=(10, 30)  # 10s connect, 30s read (SpeciesNet needs more time)
                 )
                 if response.status_code == 200:
                     return response.json()
@@ -268,7 +281,7 @@ class SpeciesNetProcessor:
     
     def get_status(self) -> str:
         try:
-            response = self.session.get(f"{self.server_url}/health", timeout=(1, 1))
+            response = self.session.get(f"{self.server_url}/health", timeout=(5, 5))
             if response.status_code == 200:
                 return "running"
             else:
@@ -339,6 +352,35 @@ class MotionEyeClient:
     def get_camera_mjpeg_url(self, camera_id: int) -> str:
         """Get the MJPEG stream URL for a camera"""
         return f"http://localhost:8765/picture/{camera_id}/current/"
+    
+    def get_camera_config(self, camera_id: int) -> Optional[Dict[str, Any]]:
+        """Get full camera configuration from MotionEye"""
+        try:
+            response = self.session.get(f"{self.base_url}/config/{camera_id}/get", timeout=(2, 2))
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            print(f"Error getting camera config from MotionEye: {e}")
+            return None
+    
+    def set_motion_settings(self, camera_id: int, motion_settings: Dict[str, Any]) -> bool:
+        """Update motion detection settings for a camera"""
+        try:
+            # Get current config first
+            current_config = self.get_camera_config(camera_id)
+            if not current_config:
+                return False
+            
+            # Update with motion settings
+            current_config.update(motion_settings)
+            
+            # Send updated config
+            response = self.session.post(f"{self.base_url}/config/{camera_id}/set", json=current_config, timeout=(2, 2))
+            return response.status_code == 200
+        except Exception as e:
+            print(f"Error setting motion settings in MotionEye: {e}")
+            return False
 
 # Global MotionEye client
 motioneye_client = MotionEyeClient()
@@ -385,6 +427,23 @@ class Detection(Base):
     detections_json = Column(Text, nullable=True)  # Store full detection data as JSON
     file_hash = Column(String, nullable=True, index=True)  # New: SHA256 hash of file
 
+# Camera sync service
+def _get_sync_interval() -> int:
+    raw_value = os.getenv("MOTIONEYE_SYNC_INTERVAL_SECONDS", "60")
+    try:
+        interval = int(raw_value)
+        return interval if interval > 0 else 60
+    except ValueError:
+        return 60
+
+
+camera_sync_service = CameraSyncService(
+    SessionLocal,
+    motioneye_client,
+    Camera,
+    poll_interval_seconds=_get_sync_interval(),
+)
+
 # Create tables with explicit error logging
 try:
     Base.metadata.create_all(bind=engine)
@@ -403,6 +462,7 @@ async def startup_event():
     try:
         # Start EventManager background tasks
         event_manager.start_background_tasks()
+        camera_sync_service.start()
         print("EventManager background tasks started")
         # Test database connection and create tables
         try:
@@ -428,9 +488,6 @@ async def startup_event():
             print("Please ensure PostgreSQL is running and accessible")
             # Continue startup - the app can still run without database initially
         
-        # Enable background camera sync task (periodic)
-        asyncio.create_task(periodic_camera_sync())
-        print("Camera sync background task started")
         # Enable background photo scanner task
         asyncio.create_task(run_photo_scanner())
         print("Photo scanner background task started")
@@ -439,11 +496,16 @@ async def startup_event():
         print(f"Error during startup: {e}")
         # Don't raise - let the app continue running
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    await camera_sync_service.stop()
+
 # Background camera sync function
 async def sync_cameras_background(cameras):
     """Sync cameras from MotionEye to database in background"""
     try:
         synced_count = 0
+        updated_count = 0
         db = SessionLocal()
         for me_camera in cameras:
             camera_id = me_camera.get("id")
@@ -480,11 +542,46 @@ async def sync_cameras_background(cameras):
                 db.add(db_camera)
                 synced_count += 1
                 print(f"Auto-synced camera: {camera_name} (ID: {camera_id})")
+            else:
+                # Update existing camera with current MotionEye status
+                existing_camera.name = camera_name
+                existing_camera.url = me_camera.get("device_url", existing_camera.url or "")
+                existing_camera.is_active = me_camera.get("enabled", existing_camera.is_active if existing_camera.is_active is not None else True)
+                existing_camera.width = me_camera.get("width", existing_camera.width if existing_camera.width is not None else 1280)
+                existing_camera.height = me_camera.get("height", existing_camera.height if existing_camera.height is not None else 720)
+                existing_camera.framerate = me_camera.get("framerate", existing_camera.framerate if existing_camera.framerate is not None else 30)
+                # Ensure other fields have defaults if None
+                if existing_camera.stream_port is None:
+                    existing_camera.stream_port = me_camera.get("streaming_port", 8081)
+                if existing_camera.stream_quality is None:
+                    existing_camera.stream_quality = me_camera.get("streaming_quality", 100)
+                if existing_camera.stream_maxrate is None:
+                    existing_camera.stream_maxrate = me_camera.get("streaming_framerate", 30)
+                if existing_camera.stream_localhost is None:
+                    existing_camera.stream_localhost = False
+                if existing_camera.detection_enabled is None:
+                    existing_camera.detection_enabled = me_camera.get("motion_detection", True)
+                if existing_camera.detection_threshold is None:
+                    existing_camera.detection_threshold = me_camera.get("frame_change_threshold", 1500)
+                if existing_camera.detection_smart_mask_speed is None:
+                    existing_camera.detection_smart_mask_speed = me_camera.get("smart_mask_sluggishness", 10)
+                if existing_camera.movie_output is None:
+                    existing_camera.movie_output = me_camera.get("movies", True)
+                if existing_camera.movie_quality is None:
+                    existing_camera.movie_quality = me_camera.get("movie_quality", 100)
+                if existing_camera.movie_codec is None:
+                    existing_camera.movie_codec = me_camera.get("movie_format", "mkv")
+                if existing_camera.snapshot_interval is None:
+                    existing_camera.snapshot_interval = me_camera.get("snapshot_interval", 0)
+                if existing_camera.target_dir is None:
+                    existing_camera.target_dir = me_camera.get("root_directory", "./motioneye_media")
+                updated_count += 1
+                print(f"Auto-updated camera: {camera_name} (ID: {camera_id}) - Active: {existing_camera.is_active}")
         
         db.commit()
         
-        if synced_count > 0:
-            print(f"Auto-synced {synced_count} cameras from MotionEye")
+        if synced_count > 0 or updated_count > 0:
+            print(f"Auto-sync completed: {synced_count} new, {updated_count} updated cameras from MotionEye")
     except Exception as e:
         print(f"Error syncing cameras: {e}")
     finally:
@@ -585,6 +682,10 @@ class CameraResponse(CameraBase):
     created_at: datetime
     stream_url: Optional[str] = None
     mjpeg_url: Optional[str] = None
+    detection_count: Optional[int] = None
+    last_detection: Optional[str] = None
+    status: Optional[str] = None
+    location: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -639,45 +740,97 @@ def health_check_api():
 
 @app.get("/system")
 async def get_system_health() -> Dict[str, Any]:
-    """Get system health and status information"""
+    """Get system health and status information - returns quickly even if some services are slow"""
     import asyncio
     from datetime import datetime
     import psutil
     try:
-        # Get system metrics immediately
-        cpu_percent = psutil.cpu_percent(interval=0.1)
+        # Get system metrics immediately (fast, no network calls)
+        # Use very short interval for cpu_percent (non-blocking requires previous call)
+        cpu_percent = psutil.cpu_percent(interval=0.01)  # Very short interval for fast response
         memory_percent = psutil.virtual_memory().percent
-        disk_percent = psutil.disk_usage('/').percent
+        try:
+            disk_percent = psutil.disk_usage('/').percent
+        except:
+            # Windows might use different path
+            disk_percent = psutil.disk_usage('C:\\').percent if os.name == 'nt' else 0
+        
         # Prepare default statuses
         motioneye_status = "unknown"
         cameras_count = 0
         speciesnet_status = "unknown"
-        loop = asyncio.get_event_loop()
-        # Try to get MotionEye status with a longer timeout
+        
+        # Run MotionEye and SpeciesNet checks concurrently with very short timeouts
+        # Use asyncio.to_thread for better cancellation support (Python 3.9+)
         try:
-            cameras = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: motioneye_client.get_cameras()),
-                timeout=2.0
+            # Create tasks with very short individual timeouts
+            motioneye_task = asyncio.create_task(
+                asyncio.wait_for(
+                    asyncio.to_thread(motioneye_client.get_cameras) if hasattr(asyncio, 'to_thread')
+                    else asyncio.get_event_loop().run_in_executor(None, motioneye_client.get_cameras),
+                    timeout=0.8  # Very short timeout - don't block
+                )
             )
-            cameras_count = len(cameras)
-            motioneye_status = "running" if cameras_count > 0 else "no_cameras"
+            
+            speciesnet_task = asyncio.create_task(
+                asyncio.wait_for(
+                    asyncio.to_thread(speciesnet_processor.get_status) if hasattr(asyncio, 'to_thread')
+                    else asyncio.get_event_loop().run_in_executor(None, speciesnet_processor.get_status),
+                    timeout=0.8  # Very short timeout - don't block
+                )
+            )
+        except AttributeError:
+            # Fallback for older Python versions
+            loop = asyncio.get_event_loop()
+            motioneye_task = asyncio.create_task(
+                asyncio.wait_for(
+                    loop.run_in_executor(None, motioneye_client.get_cameras),
+                    timeout=0.8
+                )
+            )
+            speciesnet_task = asyncio.create_task(
+                asyncio.wait_for(
+                    loop.run_in_executor(None, speciesnet_processor.get_status),
+                    timeout=0.8
+                )
+            )
+        
+        # Wait for both with a very short overall timeout
+        try:
+            motioneye_result, speciesnet_result = await asyncio.wait_for(
+                asyncio.gather(motioneye_task, speciesnet_task, return_exceptions=True),
+                timeout=1.0  # Total timeout for both checks - very short
+            )
+            
+            # Process MotionEye result
+            if isinstance(motioneye_result, Exception):
+                motioneye_status = "error"
+            elif isinstance(motioneye_result, asyncio.TimeoutError):
+                motioneye_status = "timeout"
+            else:
+                cameras_count = len(motioneye_result) if motioneye_result else 0
+                motioneye_status = "running" if cameras_count > 0 else "no_cameras"
+            
+            # Process SpeciesNet result
+            if isinstance(speciesnet_result, Exception):
+                speciesnet_status = "error"
+            elif isinstance(speciesnet_result, asyncio.TimeoutError):
+                speciesnet_status = "timeout"
+            else:
+                speciesnet_status = speciesnet_result
+                
         except asyncio.TimeoutError:
+            # If overall timeout, cancel tasks and use defaults
+            motioneye_task.cancel()
+            speciesnet_task.cancel()
             motioneye_status = "timeout"
-        except Exception as e:
-            print(f"MotionEye connection failed: {e}")
-            motioneye_status = "error"
-        # Try to get SpeciesNet status with a longer timeout
-        try:
-            speciesnet_status = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: speciesnet_processor.get_status()),
-                timeout=2.0
-            )
-        except asyncio.TimeoutError:
             speciesnet_status = "timeout"
         except Exception as e:
-            print(f"SpeciesNet status check failed: {e}")
+            # Catch any other async errors
+            motioneye_status = "error"
             speciesnet_status = "error"
-        # Compose response
+        
+        # Compose response immediately
         return {
             "status": "running",
             "system": {
@@ -695,7 +848,24 @@ async def get_system_health() -> Dict[str, Any]:
             }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting system health: {str(e)}")
+        # Return error response instead of raising exception to avoid 500
+        return {
+            "status": "error",
+            "system": {
+                "cpu_percent": 0,
+                "memory_percent": 0,
+                "disk_percent": 0,
+                "timestamp": datetime.utcnow().isoformat()
+            },
+            "motioneye": {
+                "status": "error",
+                "cameras_count": 0
+            },
+            "speciesnet": {
+                "status": "error"
+            },
+            "error": str(e)
+        }
 
 @app.get("/api/system")
 async def get_system_health_api() -> Dict[str, Any]:
@@ -705,7 +875,80 @@ async def get_system_health_api() -> Dict[str, Any]:
 @app.get("/cameras", response_model=List[CameraResponse])
 def get_cameras(db: Session = Depends(get_db)):
     cameras = db.query(Camera).all()
-    return cameras
+    
+    # Optimize: Get all detection counts in a single query (avoid N+1 problem)
+    camera_ids = [camera.id for camera in cameras]
+    
+    # Get detection counts for all cameras at once
+    detection_counts = {}
+    if camera_ids:
+        from sqlalchemy import func
+        counts_query = db.query(
+            Detection.camera_id,
+            func.count(Detection.id).label('count')
+        ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).all()
+        
+        detection_counts = {camera_id: count for camera_id, count in counts_query}
+    
+    # Get last detection timestamps for all cameras at once (most recent per camera)
+    last_detections = {}
+    if camera_ids:
+        # Use a subquery to get the max timestamp per camera, then join to get the full detection
+        subquery = db.query(
+            Detection.camera_id,
+            func.max(Detection.timestamp).label('max_timestamp')
+        ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).subquery()
+        
+        last_detections_query = db.query(Detection).join(
+            subquery,
+            (Detection.camera_id == subquery.c.camera_id) & 
+            (Detection.timestamp == subquery.c.max_timestamp)
+        ).all()
+        
+        last_detections = {det.camera_id: det.timestamp.isoformat() for det in last_detections_query}
+    
+    # Convert to response models with defaults for None values
+    result = []
+    for camera in cameras:
+        # Get detection statistics from pre-fetched data
+        detection_count = detection_counts.get(camera.id, 0)
+        last_detection_time = last_detections.get(camera.id)
+        
+        # Determine status based on is_active
+        status = "active" if (camera.is_active if camera.is_active is not None else True) else "inactive"
+        
+        # Ensure all fields have proper defaults if None
+        camera_dict = {
+            "id": camera.id,
+            "name": camera.name,
+            "url": camera.url or "",
+            "is_active": camera.is_active if camera.is_active is not None else True,
+            "width": camera.width if camera.width is not None else 1280,
+            "height": camera.height if camera.height is not None else 720,
+            "framerate": camera.framerate if camera.framerate is not None else 30,
+            "stream_port": camera.stream_port if camera.stream_port is not None else 8081,
+            "stream_quality": camera.stream_quality if camera.stream_quality is not None else 100,
+            "stream_maxrate": camera.stream_maxrate if camera.stream_maxrate is not None else 30,
+            "stream_localhost": camera.stream_localhost if camera.stream_localhost is not None else False,
+            "detection_enabled": camera.detection_enabled if camera.detection_enabled is not None else True,
+            "detection_threshold": camera.detection_threshold if camera.detection_threshold is not None else 1500,
+            "detection_smart_mask_speed": camera.detection_smart_mask_speed if camera.detection_smart_mask_speed is not None else 10,
+            "movie_output": camera.movie_output if camera.movie_output is not None else True,
+            "movie_quality": camera.movie_quality if camera.movie_quality is not None else 100,
+            "movie_codec": camera.movie_codec if camera.movie_codec is not None else "mkv",
+            "snapshot_interval": camera.snapshot_interval if camera.snapshot_interval is not None else 0,
+            "target_dir": camera.target_dir if camera.target_dir is not None else "./motioneye_media",
+            "created_at": camera.created_at,
+            "stream_url": motioneye_client.get_camera_stream_url(camera.id) if camera.id else None,
+            "mjpeg_url": motioneye_client.get_camera_mjpeg_url(camera.id) if camera.id else None,
+            # Add detection statistics
+            "detection_count": detection_count,
+            "last_detection": last_detection_time,
+            "status": status,
+            "location": None,  # Can be added later if you track camera locations
+        }
+        result.append(camera_dict)
+    return result
 
 @app.get("/api/cameras", response_model=List[CameraResponse])
 def get_cameras_api(db: Session = Depends(get_db)):
@@ -716,67 +959,7 @@ def get_cameras_api(db: Session = Depends(get_db)):
 def sync_cameras_from_motioneye(db: Session = Depends(get_db)):
     """Sync cameras from MotionEye to database"""
     try:
-        # Get cameras from MotionEye
-        motioneye_cameras = motioneye_client.get_cameras()
-        
-        if not motioneye_cameras:
-            return {"message": "No cameras found in MotionEye", "synced": 0}
-        
-        synced_count = 0
-        
-        for me_camera in motioneye_cameras:
-            camera_id = me_camera.get("id")
-            camera_name = me_camera.get("name", f"Camera{camera_id}")
-            
-            # Check if camera already exists in database
-            existing_camera = db.query(Camera).filter(Camera.id == camera_id).first()
-            
-            if not existing_camera:
-                # Create new camera in database
-                camera_data = {
-                    "id": camera_id,
-                    "name": camera_name,
-                    "url": me_camera.get("device_url", ""),  # MotionEye uses device_url
-                    "is_active": me_camera.get("enabled", True),
-                    "width": me_camera.get("width", 1280),
-                    "height": me_camera.get("height", 720),
-                    "framerate": me_camera.get("framerate", 30),
-                    "stream_port": me_camera.get("streaming_port", 8081),
-                    "stream_quality": me_camera.get("streaming_quality", 100),
-                    "stream_maxrate": me_camera.get("streaming_framerate", 30),
-                    "stream_localhost": False,  # MotionEye doesn't have this field
-                    "detection_enabled": me_camera.get("motion_detection", True),
-                    "detection_threshold": me_camera.get("frame_change_threshold", 1500),
-                    "detection_smart_mask_speed": me_camera.get("smart_mask_sluggishness", 10),
-                    "movie_output": me_camera.get("movies", True),
-                    "movie_quality": me_camera.get("movie_quality", 100),
-                    "movie_codec": me_camera.get("movie_format", "mkv"),
-                    "snapshot_interval": me_camera.get("snapshot_interval", 0),
-                    "target_dir": me_camera.get("root_directory", "./motioneye_media")
-                }
-                
-                db_camera = Camera(**camera_data)
-                db.add(db_camera)
-                synced_count += 1
-                print(f"Synced camera: {camera_name} (ID: {camera_id})")
-            else:
-                # Update existing camera
-                existing_camera.name = camera_name
-                existing_camera.url = me_camera.get("device_url", existing_camera.url)
-                existing_camera.is_active = me_camera.get("enabled", existing_camera.is_active)
-                existing_camera.width = me_camera.get("width", existing_camera.width)
-                existing_camera.height = me_camera.get("height", existing_camera.height)
-                existing_camera.framerate = me_camera.get("framerate", existing_camera.framerate)
-                print(f"Updated camera: {camera_name} (ID: {camera_id})")
-        
-        db.commit()
-        
-        return {
-            "message": f"Successfully synced {synced_count} cameras from MotionEye",
-            "synced": synced_count,
-            "total_cameras": len(motioneye_cameras)
-        }
-        
+        return sync_motioneye_cameras(db, motioneye_client, Camera)
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error syncing cameras: {str(e)}")
@@ -1231,6 +1414,75 @@ async def thingino_webhook(request: Request, db: Session = Depends(get_db)):
         print(f"Error processing Thingino webhook: {str(e)}")
         return {"status": "error", "message": str(e)}
 
+@app.get("/cameras/{camera_id}")
+def get_camera(camera_id: int, db: Session = Depends(get_db)):
+    """Get camera information"""
+    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    
+    # Get MotionEye config for motion settings
+    motioneye_config = motioneye_client.get_camera_config(camera_id)
+    
+    camera_dict = {
+        "id": camera.id,
+        "name": camera.name,
+        "url": camera.url or "",
+        "is_active": camera.is_active if camera.is_active is not None else True,
+        "width": camera.width if camera.width is not None else 1280,
+        "height": camera.height if camera.height is not None else 720,
+        "framerate": camera.framerate if camera.framerate is not None else 30,
+        "stream_port": camera.stream_port if camera.stream_port is not None else 8081,
+        "stream_quality": camera.stream_quality if camera.stream_quality is not None else 100,
+        "stream_maxrate": camera.stream_maxrate if camera.stream_maxrate is not None else 30,
+        "stream_localhost": camera.stream_localhost if camera.stream_localhost is not None else False,
+        "detection_enabled": camera.detection_enabled if camera.detection_enabled is not None else True,
+        "detection_threshold": camera.detection_threshold if camera.detection_threshold is not None else 1500,
+        "detection_smart_mask_speed": camera.detection_smart_mask_speed if camera.detection_smart_mask_speed is not None else 10,
+        "movie_output": camera.movie_output if camera.movie_output is not None else True,
+        "movie_quality": camera.movie_quality if camera.movie_quality is not None else 100,
+        "movie_codec": camera.movie_codec if camera.movie_codec is not None else "mkv",
+        "snapshot_interval": camera.snapshot_interval if camera.snapshot_interval is not None else 0,
+        "target_dir": camera.target_dir if camera.target_dir is not None else "./motioneye_media",
+        "created_at": camera.created_at,
+        "motioneye_config": motioneye_config  # Include full MotionEye config
+    }
+    return camera_dict
+
+@app.get("/cameras/{camera_id}/motion-settings")
+def get_motion_settings(camera_id: int):
+    """Get motion detection settings from MotionEye"""
+    config = motioneye_client.get_camera_config(camera_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Camera not found in MotionEye")
+    
+    # Extract motion-related settings
+    motion_settings = {
+        "threshold": config.get("threshold", 1500),
+        "threshold_maximum": config.get("threshold_maximum", 0),
+        "threshold_tune": config.get("threshold_tune", True),
+        "noise_tune": config.get("noise_tune", True),
+        "noise_level": config.get("noise_level", 32),
+        "lightswitch_percent": config.get("lightswitch_percent", 0),
+        "despeckle_filter": config.get("despeckle_filter", ""),
+        "minimum_motion_frames": config.get("minimum_motion_frames", 1),
+        "smart_mask_speed": config.get("smart_mask_speed", 0),
+        "motion_detection": config.get("motion_detection", True),
+        "picture_output_motion": config.get("picture_output_motion", False),
+        "movie_output_motion": config.get("movie_output_motion", False),
+        "pre_capture": config.get("pre_capture", 0),
+        "post_capture": config.get("post_capture", 0),
+    }
+    return motion_settings
+
+@app.post("/cameras/{camera_id}/motion-settings")
+def update_motion_settings(camera_id: int, settings: Dict[str, Any]):
+    """Update motion detection settings in MotionEye"""
+    success = motioneye_client.set_motion_settings(camera_id, settings)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update motion settings")
+    return {"message": "Motion settings updated successfully", "settings": settings}
+
 @app.get("/stream/{camera_id}")
 def get_camera_stream(camera_id: int, db: Session = Depends(get_db)):
     """Get camera stream information"""
@@ -1248,31 +1500,33 @@ def get_camera_stream(camera_id: int, db: Session = Depends(get_db)):
         "camera_type": "motioneye"
     }
 
+logger = logging.getLogger("motioneye.webhook")
+
+
 @app.post("/api/motioneye/webhook")
 async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
     """Handle MotionEye webhook notifications for motion detection"""
     try:
-        # Get the JSON data from MotionEye
-        data = await request.json()
-        
-        print(f"MotionEye webhook received: {data}")
-        
-        # MotionEye sends JSON with these typical fields:
-        # - camera_id: ID of the camera
-        # - file_path: Path to the saved image/video file
-        # - timestamp: When the event occurred
-        # - type: Type of event (picture_save, movie_end, etc.)
-        
-        camera_id = data.get("camera_id")
-        file_path = data.get("file_path")
-        timestamp = data.get("timestamp")
-        event_type = data.get("type", "unknown")
-        
-        print(f"Event type: {event_type}, Camera ID: {camera_id}, File: {file_path}")
-        
+        payload = await parse_motioneye_payload(request)
+        data = payload["raw"]
+        camera_id = payload["camera_id"]
+        file_path = payload["file_path"]
+        timestamp = payload["timestamp"]
+        event_type = payload["event_type"]
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("MotionEye webhook payload: %s", data)
+
         if not camera_id or not file_path:
-            print(f"Missing camera_id or file_path in webhook data: {data}")
-            return {"status": "error", "message": "Missing required data"}
+            if not data:
+                logger.debug("Ignoring MotionEye webhook with empty payload from MotionEye")
+            else:
+                logger.warning("Ignoring MotionEye webhook with missing data: %s", data)
+            return {"status": "ignored", "message": "Missing required data"}
+
+        if not should_process_event(file_path):
+            logger.debug("Ignoring duplicate MotionEye webhook for %s", file_path)
+            return {"status": "ignored", "message": "Duplicate event"}
         
         # Convert MotionEye file path to local path
         # MotionEye stores files in /var/lib/motioneye inside the container
@@ -1290,12 +1544,12 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
             # Fallback: try direct replacement
             local_file_path = file_path.replace("/var/lib/motioneye", os.path.join(wildlife_app_dir, "motioneye_media"))
         
-        print(f"Original MotionEye path: {file_path}")
-        print(f"Converted local path: {local_file_path}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("MotionEye path %s mapped to %s", file_path, local_file_path)
         
         # Check if file exists
         if not os.path.exists(local_file_path):
-            print(f"File not found: {local_file_path}")
+            logger.warning("MotionEye file not found: %s", local_file_path)
             return {"status": "error", "message": "File not found"}
         
         # Extract date and camera name from the file path for media URL
@@ -1321,14 +1575,21 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
         
         # Only process image files (not videos for now)
         if not local_file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
-            print(f"Skipping non-image file: {local_file_path}")
+            logger.debug("Skipping non-image MotionEye file: %s", local_file_path)
             return {"status": "skipped", "message": "Not an image file"}
+        
+        # Skip motion mask files (files ending with "m.jpg" or "m.jpeg")
+        # These are debug images showing motion detection areas, not actual wildlife photos
+        filename = os.path.basename(local_file_path).lower()
+        if filename.endswith('m.jpg') or filename.endswith('m.jpeg'):
+            logger.debug("Skipping motion mask image: %s", local_file_path)
+            return {"status": "skipped", "message": "Motion mask file (not processed)"}
         
         # Process image with SpeciesNet
         predictions = speciesnet_processor.process_image(local_file_path)
         
         if "error" in predictions:
-            print(f"SpeciesNet processing error: {predictions['error']}")
+            logger.error("SpeciesNet processing error for %s: %s", local_file_path, predictions["error"])
             # Still save the detection, but mark as unprocessed
             detection_data = {
                 "camera_id": camera_id,
@@ -1340,7 +1601,8 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
             }
         else:
             # Debug: Print the actual predictions structure
-            print(f"SpeciesNet predictions: {json.dumps(predictions, indent=2)}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("SpeciesNet predictions: %s", json.dumps(predictions))
             
             # Extract species prediction
             species = "Unknown"
@@ -1378,35 +1640,76 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
             # Clean up species name - extract meaningful information from taxonomy
             if species and ";" in species:
                 parts = species.split(";")
-                # Remove UUID if present (first part if it's very long)
-                if len(parts[0]) > 20:  # Likely a UUID
+                
+                # Remove UUID if present (first part if it's very long and looks like UUID)
+                if len(parts) > 0 and len(parts[0]) > 20 and "-" in parts[0]:
                     parts = parts[1:]
                 
-                if len(parts) >= 3:
-                    # Use genus and species if available (e.g., "Homo sapiens")
-                    if parts[-2] and parts[-1]:
-                        species = f"{parts[-2].title()} {parts[-1].title()}"
-                    else:
-                        species = parts[-1].title()
+                # Filter out empty parts and normalize
+                parts = [p.strip() for p in parts if p.strip() and p.strip().lower() not in ["", "null", "none"]]
+                
+                # Check for "no cv result" or similar
+                if any("no cv" in p.lower() or "no cv result" in p.lower() for p in parts):
+                    species = "Unknown"
+                # Check if the last meaningful part is "blank"
+                elif parts and parts[-1].lower() == "blank":
+                    species = "blank"
+                # Try to find genus and species (last two meaningful parts)
                 elif len(parts) >= 2:
-                    # Use family and genus if available (e.g., "Hominidae Homo")
-                    species = f"{parts[-2].title()} {parts[-1].title()}"
+                    # Get the last few meaningful parts (skip empty/single-letter ones)
+                    meaningful = [p for p in parts if p.strip() and len(p.strip()) > 1]
+                    
+                    if len(meaningful) >= 2:
+                        # Use the last two meaningful parts (typically genus and species)
+                        # But if the last one is a common name (human, etc.), prefer it alone
+                        last_part = meaningful[-1].lower()
+                        
+                        # Common names that should be preferred over binomial names
+                        common_names = ["human", "sapiens", "homospecies"]
+                        if last_part in common_names:
+                            species = meaningful[-1].title()
+                        else:
+                            # Use binomial name (genus + species)
+                            species = f"{meaningful[-2].title()} {meaningful[-1].title()}"
+                    elif len(meaningful) == 1:
+                        species = meaningful[0].title()
+                    else:
+                        # Fallback: use last non-empty part even if short
+                        species = parts[-1].title() if parts else "Unknown"
+                elif len(parts) == 1:
+                    # Single part - use it if it's meaningful
+                    if len(parts[0]) > 1:
+                        species = parts[0].title()
+                    else:
+                        species = "Unknown"
                 else:
-                    # Fallback to last part
-                    species = parts[-1].title()
+                    species = "Unknown"
             elif species and species != "Unknown":
-                # If it's a UUID or complex format, try to extract meaningful part
-                if len(species) > 50:  # Likely a complex taxonomy string
-                    parts = species.split(";")
-                    if len(parts) > 1:
-                        # Remove UUID and use meaningful parts
-                        meaningful_parts = [p for p in parts if len(p) < 20 and p.strip()]
+                # Check if it's a UUID or looks like one
+                if len(species) > 30 and "-" in species:
+                    # Might be a UUID, try to extract meaningful parts
+                    if ";" in species:
+                        parts = species.split(";")
+                        meaningful_parts = [p.strip() for p in parts if p.strip() and len(p) < 30 and "-" not in p]
                         if meaningful_parts:
-                            species = " ".join(meaningful_parts[-2:]).title()
+                            species = meaningful_parts[-1].title() if len(meaningful_parts[-1]) > 1 else "Unknown"
                         else:
                             species = "Unknown"
                     else:
                         species = "Unknown"
+                # Check for "no cv result" or similar
+                elif "no cv" in species.lower() or "no cv result" in species.lower():
+                    species = "Unknown"
+                # If it's a single word/short string, use it
+                elif len(species) <= 50 and len(species) > 1:
+                    species = species.title()
+                else:
+                    species = "Unknown"
+            
+            # Skip "blank" detections - don't save them to database
+            if species and species.lower().strip() == "blank":
+                logger.debug("Skipping blank detection from %s", local_file_path)
+                return {"status": "skipped", "message": "Blank image (no wildlife detected)"}
             
             # Save detection to database
             detection_data = {
@@ -1425,7 +1728,14 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(db_detection)
         
-        print(f"Detection saved: ID={db_detection.id}, Species={detection_data['species']}, Confidence={detection_data['confidence']}")
+        logger.info(
+            "Saved detection %s from camera %s (%s) species=%s confidence=%.2f",
+            db_detection.id,
+            camera_id,
+            camera_name,
+            detection_data["species"],
+            detection_data["confidence"],
+        )
         
         # Get camera information for the response - use database name if available, otherwise use extracted name
         camera_info = db.query(Camera).filter(Camera.id == camera_id).first()
@@ -1739,6 +2049,11 @@ class PhotoScanner:
                 for filename in os.listdir(date_path):
                     if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
                         continue
+                    # Skip motion mask files (files ending with "m.jpg" or "m.jpeg")
+                    # These are debug images showing motion detection areas, not actual wildlife photos
+                    filename_lower = filename.lower()
+                    if filename_lower.endswith('m.jpg') or filename_lower.endswith('m.jpeg'):
+                        continue
                     file_path = os.path.join(date_path, filename)
                     try:
                         file_hash = self.compute_file_hash(file_path)
@@ -1786,6 +2101,81 @@ class PhotoScanner:
             elif "species" in speciesnet_response:
                 species = speciesnet_response.get("species", "Unknown")
                 confidence = speciesnet_response.get("confidence", 0.0)
+            
+            # Clean up species name (similar to webhook handler)
+            if species and ";" in species:
+                parts = species.split(";")
+                
+                # Remove UUID if present (first part if it's very long and looks like UUID)
+                if len(parts) > 0 and len(parts[0]) > 20 and "-" in parts[0]:
+                    parts = parts[1:]
+                
+                # Filter out empty parts and normalize
+                parts = [p.strip() for p in parts if p.strip() and p.strip().lower() not in ["", "null", "none"]]
+                
+                # Check for "no cv result" or similar
+                if any("no cv" in p.lower() or "no cv result" in p.lower() for p in parts):
+                    species = "Unknown"
+                # Check if the last meaningful part is "blank"
+                elif parts and parts[-1].lower() == "blank":
+                    species = "blank"
+                # Try to find genus and species (last two meaningful parts)
+                elif len(parts) >= 2:
+                    # Get the last few meaningful parts (skip empty/single-letter ones)
+                    meaningful = [p for p in parts if p.strip() and len(p.strip()) > 1]
+                    
+                    if len(meaningful) >= 2:
+                        # Use the last two meaningful parts (typically genus and species)
+                        # But if the last one is a common name (human, etc.), prefer it alone
+                        last_part = meaningful[-1].lower()
+                        
+                        # Common names that should be preferred over binomial names
+                        common_names = ["human", "sapiens", "homospecies"]
+                        if last_part in common_names:
+                            species = meaningful[-1].title()
+                        else:
+                            # Use binomial name (genus + species)
+                            species = f"{meaningful[-2].title()} {meaningful[-1].title()}"
+                    elif len(meaningful) == 1:
+                        species = meaningful[0].title()
+                    else:
+                        # Fallback: use last non-empty part even if short
+                        species = parts[-1].title() if parts else "Unknown"
+                elif len(parts) == 1:
+                    # Single part - use it if it's meaningful
+                    if len(parts[0]) > 1:
+                        species = parts[0].title()
+                    else:
+                        species = "Unknown"
+                else:
+                    species = "Unknown"
+            elif species and species != "Unknown":
+                # Check if it's a UUID or looks like one
+                if len(species) > 30 and "-" in species:
+                    # Might be a UUID, try to extract meaningful parts
+                    if ";" in species:
+                        parts = species.split(";")
+                        meaningful_parts = [p.strip() for p in parts if p.strip() and len(p) < 30 and "-" not in p]
+                        if meaningful_parts:
+                            species = meaningful_parts[-1].title() if len(meaningful_parts[-1]) > 1 else "Unknown"
+                        else:
+                            species = "Unknown"
+                    else:
+                        species = "Unknown"
+                # Check for "no cv result" or similar
+                elif "no cv" in species.lower() or "no cv result" in species.lower():
+                    species = "Unknown"
+                # If it's a single word/short string, use it
+                elif len(species) <= 50 and len(species) > 1:
+                    species = species.title()
+                else:
+                    species = "Unknown"
+            
+            # Skip "blank" detections - don't save them to database
+            if species and species.lower().strip() == "blank":
+                print(f"[PhotoScanner] Skipping blank detection (no wildlife): {photo_info['filename']}")
+                return  # Don't save blank detections
+            
             archived_path = self.archive_photo(photo_info['file_path'], species, camera_id)
             detection_data = {
                 "camera_id": camera_id,
@@ -1801,6 +2191,48 @@ class PhotoScanner:
             self.db.commit()
             self.db.refresh(db_detection)
             self.processed_hashes.add(file_hash)
+            
+            # Broadcast detection to connected clients for real-time updates
+            try:
+                camera_info = self.db.query(Camera).filter(Camera.id == camera_id).first()
+                camera_name = camera_info.name if camera_info else f"Camera{camera_id}"
+                
+                # Extract media URL from archived path
+                path_parts = archived_path.split(os.sep)
+                media_url = None
+                if "archived_photos" in path_parts:
+                    idx = path_parts.index("archived_photos")
+                    if len(path_parts) > idx + 4:
+                        species_name = path_parts[idx + 1]
+                        camera_folder = path_parts[idx + 2]
+                        date_folder = path_parts[idx + 3]
+                        filename = path_parts[idx + 4]
+                        media_url = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+                
+                detection_event = {
+                    "id": db_detection.id,
+                    "camera_id": camera_id,
+                    "camera_name": camera_name,
+                    "species": detection_data["species"],
+                    "confidence": detection_data["confidence"],
+                    "image_path": archived_path,
+                    "timestamp": db_detection.timestamp.isoformat(),
+                    "media_url": media_url or f"/media/{camera_name}/{path_parts[-2] if len(path_parts) >= 2 else 'unknown'}/{path_parts[-1]}"
+                }
+                
+                # Get event loop and broadcast
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(event_manager.broadcast_detection(detection_event))
+                    else:
+                        asyncio.run(event_manager.broadcast_detection(detection_event))
+                except RuntimeError:
+                    # Fallback if no event loop
+                    asyncio.run(event_manager.broadcast_detection(detection_event))
+            except Exception as e:
+                print(f"Error broadcasting detection from PhotoScanner: {e}")
+            
             if species.lower() != "unknown":
                 print(f"Processed and archived photo: {photo_info['filename']} -> {detection_data['species']} ({detection_data['confidence']:.2f})")
             else:

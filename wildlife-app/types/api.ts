@@ -4,6 +4,10 @@ export interface Camera {
   url: string
   is_active: boolean
   created_at: string
+  detection_count?: number
+  last_detection?: string
+  location?: string
+  status?: string
 }
 
 export interface Detection {

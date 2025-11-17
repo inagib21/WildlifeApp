@@ -36,10 +36,30 @@ def initialize_speciesnet():
     try:
         import speciesnet
         from speciesnet import SpeciesNet, DEFAULT_MODEL
+        import torch
         
-        logger.info(f"Initializing SpeciesNet with model: {DEFAULT_MODEL}")
-        speciesnet_model = SpeciesNet(DEFAULT_MODEL)
-        logger.info("SpeciesNet model initialized successfully")
+        # Check if CUDA is available
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Initializing SpeciesNet with model: {DEFAULT_MODEL} on device: {device}")
+        
+        # Initialize SpeciesNet - check if device parameter is supported
+        try:
+            speciesnet_model = SpeciesNet(DEFAULT_MODEL, device=device)
+        except TypeError:
+            # If device parameter is not supported, try without it
+            logger.warning("SpeciesNet doesn't support device parameter, using default")
+            speciesnet_model = SpeciesNet(DEFAULT_MODEL)
+            # Try to move model to GPU manually if available
+            if torch.cuda.is_available() and hasattr(speciesnet_model, 'to'):
+                try:
+                    speciesnet_model = speciesnet_model.to(device)
+                    logger.info(f"Moved SpeciesNet model to {device}")
+                except:
+                    logger.warning("Could not move model to GPU, using CPU")
+        
+        logger.info(f"SpeciesNet model initialized successfully on {device}")
+        if torch.cuda.is_available():
+            logger.info(f"GPU device: {torch.cuda.get_device_name(0)}")
         return True
     except Exception as e:
         logger.error(f"Error initializing SpeciesNet: {e}")

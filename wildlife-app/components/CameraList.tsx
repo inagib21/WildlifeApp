@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import axios from 'axios';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { CameraForm } from './CameraForm';
 import { toast } from "sonner";
+import { getCameras, syncCamerasFromMotionEye } from '@/lib/api';
 
 import { CameraStream } from './camera-stream';
 import { CameraConfig } from './CameraConfig';
@@ -24,21 +25,33 @@ const CameraList: React.FC = () => {
   const [selectedCamera, setSelectedCamera] = useState<Camera | null>(null);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
 
-  const fetchCameras = async () => {
+  const fetchCameras = useCallback(async () => {
     try {
-      const response = await axios.get('http://localhost:8001/cameras');
-      setCameras(response.data);
+      const data = await getCameras();
+      setCameras(data);
     } catch (error) {
       console.error('Error fetching cameras:', error);
     }
-  };
+  }, []);
+
+  const handleSyncCameras = useCallback(async () => {
+    try {
+      const response = await syncCamerasFromMotionEye();
+      toast.success(response.message || `Synced ${response.synced || 0} cameras from MotionEye`);
+      fetchCameras(); // Refresh the list after sync
+    } catch (error: any) {
+      console.error('Error syncing cameras:', error);
+      toast.error(error.response?.data?.detail || "Failed to sync cameras from MotionEye");
+    }
+  }, [fetchCameras]);
 
   useEffect(() => {
-    fetchCameras();
+    // Sync cameras from MotionEye on initial load
+    handleSyncCameras();
     // Refresh camera list every 30 seconds
     const interval = setInterval(fetchCameras, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [handleSyncCameras, fetchCameras]);
 
   const handleCameraSelect = (camera: Camera) => {
     setSelectedCamera(camera);
@@ -88,10 +101,17 @@ const CameraList: React.FC = () => {
         <div className="flex gap-3">
           <Button 
             variant="outline" 
+            onClick={handleSyncCameras}
+            className="flex items-center gap-2"
+          >
+            🔄 Sync from MotionEye
+          </Button>
+          <Button 
+            variant="outline" 
             onClick={fetchCameras}
             className="flex items-center gap-2"
           >
-            🔄 Refresh
+            ↻ Refresh
           </Button>
           <Dialog>
             <DialogTrigger asChild>
@@ -183,58 +203,51 @@ const CameraList: React.FC = () => {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {cameras.map((camera) => (
             <Card key={camera.id} className="overflow-hidden shadow-lg hover:shadow-xl transition-shadow">
-              <CardHeader className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20">
-                <div className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <div>
-                    <CardTitle className="text-xl font-bold text-gray-900 dark:text-gray-100">
-                      {camera.name}
-                    </CardTitle>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      Camera ID: {camera.id}
-                    </p>
-                  </div>
+              <CardHeader className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20 p-4">
+                <div className="flex flex-row items-center justify-between">
+                  <CardTitle className="text-lg font-bold text-gray-900 dark:text-gray-100">
+                    {camera.name}
+                  </CardTitle>
                   <Badge 
                     variant={camera.is_active ? "default" : "destructive"}
-                    className="text-xs px-3 py-1"
+                    className="text-xs px-2 py-0.5"
                   >
-                    {camera.is_active ? "🟢 Active" : "🔴 Inactive"}
+                    {camera.is_active ? "🟢" : "🔴"}
                   </Badge>
                 </div>
-                <div className="text-xs text-muted-foreground">
-                  <p>URL: {camera.url}</p>
-                  <p>Added: {new Date(camera.created_at).toLocaleDateString()}</p>
-                </div>
               </CardHeader>
-              <CardContent className="p-6">
-                <div className="space-y-6">
+              <CardContent className="p-4">
+                <div className="space-y-3">
                   {/* Camera Stream */}
-                  <div className="border rounded-lg overflow-hidden bg-gray-50 dark:bg-gray-900">
+                  <div className="border rounded-lg overflow-hidden bg-gray-50 dark:bg-gray-900 aspect-square">
                     <CameraStream
                       cameraId={camera.id.toString()}
                       title={camera.name}
-                      width={640}
-                      height={480}
+                      width={400}
+                      height={400}
                     />
                   </div>
                   
                   {/* Camera Actions */}
-                  <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex gap-2">
                     <Button
                       variant="outline"
-                      className="flex-1"
+                      size="sm"
+                      className="flex-1 text-xs"
                       onClick={() => {
                         setSelectedCamera(camera);
                         setIsConfigOpen(true);
                       }}
                     >
-                      ⚙️ Configure
+                      ⚙️ Config
                     </Button>
                     <Button
                       variant="destructive"
-                      className="flex-1"
+                      size="sm"
+                      className="flex-1 text-xs"
                       onClick={() => handleRemoveCamera(camera.id)}
                     >
                       🗑️ Remove
@@ -244,7 +257,7 @@ const CameraList: React.FC = () => {
                   {/* Camera Type Indicator */}
                   <div className="text-center">
                     <Badge variant="secondary" className="text-xs">
-                      {camera.id >= 9 ? "Thingino Camera" : "MotionEye Camera"}
+                      {camera.id >= 9 ? "Thingino" : "MotionEye"}
                     </Badge>
                   </div>
                 </div>

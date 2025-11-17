@@ -86,8 +86,9 @@ export function DetectionsList() {
       }
       
       // Handle detection events
-      if (data.type === 'detection' && data.detection) {
-        const newDetection = data.detection
+      // Backend sends: { type: 'detection', data: detectionObject, timestamp: ... }
+      if (data.type === 'detection' && data.data) {
+        const newDetection = data.data
         
         // Add the new detection to the list if we're on the first page
         if (page === 0) {

@@ -36,6 +36,23 @@ interface CameraConfig {
   target_dir: string;
 }
 
+interface MotionSettings {
+  threshold: number;
+  threshold_maximum: number;
+  threshold_tune: boolean;
+  noise_tune: boolean;
+  noise_level: number;
+  lightswitch_percent: number;
+  despeckle_filter: string;
+  minimum_motion_frames: number;
+  smart_mask_speed: number;
+  motion_detection: boolean;
+  picture_output_motion: boolean;
+  movie_output_motion: boolean;
+  pre_capture: number;
+  post_capture: number;
+}
+
 export const CameraConfig: React.FC<CameraConfigProps> = ({ cameraId, onClose }) => {
   const [config, setConfig] = useState<CameraConfig>({
     id: cameraId,
@@ -61,9 +78,26 @@ export const CameraConfig: React.FC<CameraConfigProps> = ({ cameraId, onClose })
   const [isLoading, setIsLoading] = useState(false);
   const [cameraStatus, setCameraStatus] = useState<string>('unknown');
   const [isTesting, setIsTesting] = useState(false);
+  const [motionSettings, setMotionSettings] = useState<MotionSettings>({
+    threshold: 1500,
+    threshold_maximum: 0,
+    threshold_tune: true,
+    noise_tune: true,
+    noise_level: 32,
+    lightswitch_percent: 0,
+    despeckle_filter: '',
+    minimum_motion_frames: 1,
+    smart_mask_speed: 0,
+    motion_detection: true,
+    picture_output_motion: false,
+    movie_output_motion: false,
+    pre_capture: 0,
+    post_capture: 0,
+  });
 
   useEffect(() => {
     loadCameraConfig();
+    loadMotionSettings();
     checkCameraStatus();
   }, [cameraId]);
 
@@ -75,6 +109,17 @@ export const CameraConfig: React.FC<CameraConfigProps> = ({ cameraId, onClose })
       }
     } catch (error) {
       console.error('Error loading camera config:', error);
+    }
+  };
+
+  const loadMotionSettings = async () => {
+    try {
+      const response = await axios.get(`http://localhost:8001/cameras/${cameraId}/motion-settings`);
+      if (response.data) {
+        setMotionSettings(response.data);
+      }
+    } catch (error) {
+      console.error('Error loading motion settings:', error);
     }
   };
 
@@ -167,6 +212,18 @@ export const CameraConfig: React.FC<CameraConfigProps> = ({ cameraId, onClose })
 
   const handleConfigChange = (key: keyof CameraConfig, value: any) => {
     setConfig(prev => ({ ...prev, [key]: value }));
+  };
+
+  const saveMotionSettings = async () => {
+    setIsLoading(true);
+    try {
+      await axios.post(`http://localhost:8001/cameras/${cameraId}/motion-settings`, motionSettings);
+      toast.success("Motion settings saved successfully");
+    } catch (error: any) {
+      toast.error(error.response?.data?.detail || "Failed to save motion settings");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -315,38 +372,175 @@ export const CameraConfig: React.FC<CameraConfigProps> = ({ cameraId, onClose })
         <TabsContent value="detection" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Motion Detection</CardTitle>
+              <CardTitle>Motion Detection Settings</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex items-center space-x-2">
                 <Switch
-                  id="detection_enabled"
-                  checked={config.detection_enabled}
-                  onCheckedChange={(checked) => handleConfigChange('detection_enabled', checked)}
+                  id="motion_detection"
+                  checked={motionSettings.motion_detection}
+                  onCheckedChange={(checked) => setMotionSettings(prev => ({ ...prev, motion_detection: checked }))}
                 />
-                <Label htmlFor="detection_enabled">Enable Motion Detection</Label>
+                <Label htmlFor="motion_detection">Enable Motion Detection</Label>
               </div>
-              
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <Label htmlFor="detection_threshold">Detection Threshold</Label>
+                  <Label htmlFor="threshold">Motion Threshold</Label>
                   <Input
-                    id="detection_threshold"
+                    id="threshold"
                     type="number"
-                    value={config.detection_threshold}
-                    onChange={(e) => handleConfigChange('detection_threshold', parseInt(e.target.value))}
+                    value={motionSettings.threshold}
+                    onChange={(e) => setMotionSettings(prev => ({ ...prev, threshold: parseInt(e.target.value) || 0 }))}
                   />
+                  <p className="text-xs text-muted-foreground mt-1">Lower = more sensitive (default: 1500)</p>
                 </div>
                 <div>
-                  <Label htmlFor="detection_smart_mask_speed">Smart Mask Speed</Label>
+                  <Label htmlFor="threshold_maximum">Threshold Maximum</Label>
                   <Input
-                    id="detection_smart_mask_speed"
+                    id="threshold_maximum"
                     type="number"
-                    value={config.detection_smart_mask_speed}
-                    onChange={(e) => handleConfigChange('detection_smart_mask_speed', parseInt(e.target.value))}
+                    value={motionSettings.threshold_maximum}
+                    onChange={(e) => setMotionSettings(prev => ({ ...prev, threshold_maximum: parseInt(e.target.value) || 0 }))}
                   />
+                  <p className="text-xs text-muted-foreground mt-1">0 = disabled</p>
                 </div>
               </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="noise_level">Noise Level</Label>
+                  <Input
+                    id="noise_level"
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={motionSettings.noise_level}
+                    onChange={(e) => setMotionSettings(prev => ({ ...prev, noise_level: parseInt(e.target.value) || 0 }))}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">Ignore noise below this level (0-100)</p>
+                </div>
+                <div>
+                  <Label htmlFor="minimum_motion_frames">Minimum Motion Frames</Label>
+                  <Input
+                    id="minimum_motion_frames"
+                    type="number"
+                    min="1"
+                    value={motionSettings.minimum_motion_frames}
+                    onChange={(e) => setMotionSettings(prev => ({ ...prev, minimum_motion_frames: parseInt(e.target.value) || 1 }))}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">Frames before triggering (default: 1)</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="smart_mask_speed">Smart Mask Speed</Label>
+                  <Input
+                    id="smart_mask_speed"
+                    type="number"
+                    min="0"
+                    value={motionSettings.smart_mask_speed}
+                    onChange={(e) => setMotionSettings(prev => ({ ...prev, smart_mask_speed: parseInt(e.target.value) || 0 }))}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">0 = disabled, higher = faster learning</p>
+                </div>
+                <div>
+                  <Label htmlFor="lightswitch_percent">Lightswitch Percent</Label>
+                  <Input
+                    id="lightswitch_percent"
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={motionSettings.lightswitch_percent}
+                    onChange={(e) => setMotionSettings(prev => ({ ...prev, lightswitch_percent: parseInt(e.target.value) || 0 }))}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">Ignore light changes below this % (0-100)</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="pre_capture">Pre-Capture (seconds)</Label>
+                  <Input
+                    id="pre_capture"
+                    type="number"
+                    min="0"
+                    value={motionSettings.pre_capture}
+                    onChange={(e) => setMotionSettings(prev => ({ ...prev, pre_capture: parseInt(e.target.value) || 0 }))}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">Record before motion detected</p>
+                </div>
+                <div>
+                  <Label htmlFor="post_capture">Post-Capture (seconds)</Label>
+                  <Input
+                    id="post_capture"
+                    type="number"
+                    min="0"
+                    value={motionSettings.post_capture}
+                    onChange={(e) => setMotionSettings(prev => ({ ...prev, post_capture: parseInt(e.target.value) || 0 }))}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">Record after motion ends</p>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-2">
+                  <Switch
+                    id="threshold_tune"
+                    checked={motionSettings.threshold_tune}
+                    onCheckedChange={(checked) => setMotionSettings(prev => ({ ...prev, threshold_tune: checked }))}
+                  />
+                  <Label htmlFor="threshold_tune">Auto-Tune Threshold</Label>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <Switch
+                    id="noise_tune"
+                    checked={motionSettings.noise_tune}
+                    onCheckedChange={(checked) => setMotionSettings(prev => ({ ...prev, noise_tune: checked }))}
+                  />
+                  <Label htmlFor="noise_tune">Auto-Tune Noise</Label>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-2">
+                  <Switch
+                    id="picture_output_motion"
+                    checked={motionSettings.picture_output_motion}
+                    onCheckedChange={(checked) => setMotionSettings(prev => ({ ...prev, picture_output_motion: checked }))}
+                  />
+                  <Label htmlFor="picture_output_motion">Save Pictures on Motion</Label>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <Switch
+                    id="movie_output_motion"
+                    checked={motionSettings.movie_output_motion}
+                    onCheckedChange={(checked) => setMotionSettings(prev => ({ ...prev, movie_output_motion: checked }))}
+                  />
+                  <Label htmlFor="movie_output_motion">Save Videos on Motion</Label>
+                </div>
+              </div>
+
+              <div>
+                <Label htmlFor="despeckle_filter">Despeckle Filter</Label>
+                <Input
+                  id="despeckle_filter"
+                  value={motionSettings.despeckle_filter}
+                  onChange={(e) => setMotionSettings(prev => ({ ...prev, despeckle_filter: e.target.value }))}
+                  placeholder="EedDl (e.g., EedDl = Erode, dilate, dilate, Erode)"
+                />
+                <p className="text-xs text-muted-foreground mt-1">Filter pattern to reduce false positives</p>
+              </div>
+
+              <Button
+                onClick={saveMotionSettings}
+                disabled={isLoading}
+                variant="default"
+                className="w-full"
+              >
+                Save Motion Settings
+              </Button>
             </CardContent>
           </Card>
         </TabsContent>

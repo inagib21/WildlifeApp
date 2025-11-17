@@ -113,7 +113,7 @@ const columns: ColumnDef<Camera>[] = [
   {
     accessorKey: "detection_count",
     header: "Total Detections",
-    cell: ({ row }) => <div>{row.original.detection_count}</div>,
+    cell: ({ row }) => <div>{row.original.detection_count ?? 0}</div>,
   },
   {
     id: "actions",

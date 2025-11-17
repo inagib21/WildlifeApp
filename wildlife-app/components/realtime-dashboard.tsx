@@ -56,7 +56,42 @@ export function RealtimeDashboard() {
 
   // Real-time connections
   const { isConnected: detectionsConnected, error: detectionsError } = useDetectionsRealtime((newDetection) => {
+    // Update detections list
     setDetections(prev => prev ? [newDetection, ...prev.slice(0, 49)] : [newDetection])
+    
+    // Update KPI counts in real-time
+    setTotalDetectionsCount(prev => (prev ?? 0) + 1)
+    
+    // Update camera detection counts in real-time
+    setCameras(prev => {
+      if (!prev) return prev
+      return prev.map(camera => {
+        if (camera.id === newDetection.camera_id) {
+          return {
+            ...camera,
+            detection_count: (camera.detection_count || 0) + 1,
+            last_detection: newDetection.timestamp
+          }
+        }
+        return camera
+      })
+    })
+    
+    // Update unique species count (simplified - just increment if new species)
+    // Note: This is approximate, for exact count we'd need to refetch
+    setTotalUniqueSpecies(prev => {
+      if (!prev) return 1
+      // Check if this is a new species by looking at existing detections
+      const existingSpecies = new Set((detections || []).map(d => d.species).filter(Boolean))
+      if (!existingSpecies.has(newDetection.species) && newDetection.species && newDetection.species !== 'Unknown') {
+        return prev + 1
+      }
+      return prev
+    })
+    
+    // Update allDetections for charts
+    setAllDetections(prev => [newDetection, ...prev].slice(0, 2000))
+    
     setLastUpdate(new Date())
   })
   const { isConnected: systemConnected, error: systemError } = useSystemRealtime((systemData) => {

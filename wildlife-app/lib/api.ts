@@ -115,7 +115,7 @@ export async function createDetection(detection: Omit<Detection, 'id'>): Promise
 export async function getSystemHealth() {
   try {
     const response = await axios.get(`${API_URL}/system`, {
-      timeout: 5000 // 5 second timeout
+      timeout: 3000 // 3 second timeout (backend optimized to respond quickly)
     })
     const data = response.data
     return {
@@ -126,32 +126,38 @@ export async function getSystemHealth() {
       speciesnet_status: data.speciesnet?.status || 'unknown',
       system: data.system
     }
-  } catch (error) {
-    console.warn('System health fetch failed, retrying in 5s...', error)
-    // Wait 5 seconds and retry once
-    await new Promise(resolve => setTimeout(resolve, 5000))
-    try {
-      const response = await axios.get(`${API_URL}/system`, {
-        timeout: 5000
-      })
-      const data = response.data
+  } catch (error: any) {
+    // Handle timeout gracefully - don't retry, just return default values
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      console.warn('System health check timeout - returning default values')
       return {
-        status: data.motioneye?.status || 'unknown',
-        cameras: data.motioneye?.cameras_count || 0,
-        detections: 0,
-        motioneye_status: data.motioneye?.status || 'unknown',
-        speciesnet_status: data.speciesnet?.status || 'unknown',
-        system: data.system
-      }
-    } catch (error2) {
-      console.error('Error fetching system health (after retry):', error2)
-      return {
-        status: 'error',
+        status: 'timeout',
         cameras: 0,
         detections: 0,
-        motioneye_status: 'error',
-        speciesnet_status: 'error',
-        system: null
+        motioneye_status: 'timeout',
+        speciesnet_status: 'timeout',
+        system: {
+          cpu_percent: 0,
+          memory_percent: 0,
+          disk_percent: 0,
+          timestamp: new Date().toISOString()
+        }
+      }
+    }
+    
+    console.error('Error fetching system health:', error)
+    // Return default values instead of throwing - don't break the UI
+    return {
+      status: 'error',
+      cameras: 0,
+      detections: 0,
+      motioneye_status: 'error',
+      speciesnet_status: 'error',
+      system: {
+        cpu_percent: 0,
+        memory_percent: 0,
+        disk_percent: 0,
+        timestamp: new Date().toISOString()
       }
     }
   }

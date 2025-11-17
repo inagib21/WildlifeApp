@@ -1,7 +1,6 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
 
@@ -49,78 +48,45 @@ export function CameraStream({ cameraId, title, width = 640, height = 480 }: Cam
   };
 
   return (
-    <Card className="w-full">
-      <CardHeader className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20">
-        <CardTitle className="flex items-center gap-2">
-          <span className="text-blue-600">📷</span>
-          {title}
-        </CardTitle>
-        {streamInfo && (
-          <div className="text-sm text-muted-foreground flex items-center gap-2">
-            <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
-            MotionEye: {streamInfo.motioneye_url}
-          </div>
-        )}
-      </CardHeader>
-      <CardContent>
-        {isLoading && (
-          <Skeleton className="w-full" style={{ width, height }} />
-        )}
-        {error && (
-          <div className="flex flex-col items-center justify-center space-y-4" style={{ width, height }}>
-            <p className="text-destructive text-center">
-              {error}
-            </p>
-            <div className="text-sm text-muted-foreground text-center space-y-2">
-              <p>Camera stream is not available. This could be because:</p>
-              <ul className="list-disc list-inside space-y-1">
-                <li>Camera is not configured in MotionEye</li>
-                <li>RTSP URL is incorrect or camera is offline</li>
-                <li>MotionEye needs to be restarted</li>
-              </ul>
-            </div>
-            <div className="flex space-x-2">
-              <Button variant="outline" onClick={openMotionEye}>
-                Open MotionEye
-              </Button>
-              <Button variant="outline" onClick={() => window.location.reload()}>
-                Retry
-              </Button>
-            </div>
-          </div>
-        )}
-        <img
-          ref={streamRef}
-          src={pictureUrl}
-          alt={`Camera ${title} stream`}
-          style={{ width, height, display: isLoading || error ? 'none' : 'block' }}
-          onLoad={() => {
-            setIsLoading(false)
-            setError(null)
-          }}
-          onError={() => {
-            setIsLoading(false)
-            setError('Failed to load camera stream from MotionEye')
-          }}
-          className="rounded-lg object-cover"
-        />
-        {streamInfo && !error && (
-          <div className="mt-2 text-xs text-muted-foreground">
-            <div>RTSP: {streamInfo.rtsp_url}</div>
-            <div>Stream: {streamInfo.stream_url}</div>
-            <div className="mt-2">
-              <Button 
-                variant="outline" 
-                size="sm" 
-                onClick={openMotionEye}
-                className="text-xs"
-              >
-                Configure in MotionEye
-              </Button>
-            </div>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+    <div className="w-full h-full flex items-center justify-center relative">
+      {isLoading && (
+        <Skeleton className="w-full h-full" />
+      )}
+      {error && (
+        <div className="flex flex-col items-center justify-center space-y-2 p-4" style={{ width, height }}>
+          <p className="text-destructive text-center text-sm">
+            {error}
+          </p>
+          <Button 
+            variant="outline" 
+            size="sm"
+            onClick={openMotionEye}
+            className="text-xs"
+          >
+            Open MotionEye
+          </Button>
+        </div>
+      )}
+      <img
+        ref={streamRef}
+        src={pictureUrl}
+        alt={`Camera ${title} stream`}
+        style={{ 
+          width: '100%', 
+          height: '100%', 
+          display: isLoading || error ? 'none' : 'block',
+          objectFit: 'cover'
+        }}
+        onLoad={() => {
+          setIsLoading(false)
+          setError(null)
+        }}
+        onError={() => {
+          setIsLoading(false)
+          setError('Failed to load camera stream')
+        }}
+        className="rounded-lg"
+      />
+    </div>
   )
 } 
