@@ -31,64 +31,100 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
 
 ## Quick Start
 
+### 🚀 Easiest Method: Use the Control Center (Recommended)
+
+**For Windows users**, we've created convenient startup scripts:
+
+1. **Double-click `wildlife-app-control.bat`** - This opens a menu-driven control center
+2. Select option **`[1] Start All Services`** - This will:
+   - Check and start Docker (if needed)
+   - Start Docker services (PostgreSQL & MotionEye)
+   - Launch Backend server (port 8001)
+   - Launch Frontend server (port 3000)
+3. When done, select option **`[2] Stop All Services`** to cleanly shut everything down
+
+**Alternative scripts:**
+- `start-wildlife-app.bat` - Simple one-click startup (starts everything)
+- `stop-wildlife-app.bat` - One-click shutdown (stops everything)
+
+### Manual Setup (Alternative)
+
 ### 1. Clone the repository
 ```sh
 git clone https://github.com/inagib21/WildlifeApp.git
-cd wildlife-app
+cd Wildlife
 ```
 
 ### 2. Install Python dependencies
 - Use the provided `requirements.txt` (auto-generated from the working environment):
 ```sh
-pip install -r requirements.txt
+pip install -r wildlife-app/backend/requirements.txt
 ```
 
-### 3. Start the services (Docker Compose)
+### 3. Install Node.js dependencies
+```sh
+cd wildlife-app
+npm install
+```
+
+### 4. Start the services (Docker Compose)
 - This will start PostgreSQL (with pg_mooncake) and MotionEye:
 ```sh
 docker-compose up -d
 ```
-### 4. Initialize and configure each camera on their local addresses eg...
-refer to microtik for addresses: http://192.168.88.1/
 
-(https://192.168.88.22/)
+### 5. Initialize and configure each camera on their local addresses
+- Refer to microtik for addresses: http://192.168.88.1/
+- Example: https://192.168.88.22/
 
-### 5. Configure the cameras on motion eye : 
- MotionEye: http://localhost:8765
+### 6. Configure the cameras on MotionEye
+- MotionEye: http://localhost:8765
 
-### 6. SUGGESTED: Run the frontend & backend together (Next.js) & (FastAPI)
+### 7. Run the frontend & backend together (Next.js) & (FastAPI)
 ```sh
 cd wildlife-app
-npm install
 npm run dev:all
 ```
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8001/docs
 - MotionEye: http://localhost:8765
 
-### 7. OPTIONAL: Run the backend (FastAPI)
+### 8. OPTIONAL: Run services separately
+
+**Backend only:**
 ```sh
-cd backend
+cd wildlife-app/backend
 python -m uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-### 8. OPTIONAL: Run the frontend (Next.js)
+**Frontend only:**
 ```sh
-cd ..
-npm install
+cd wildlife-app
 npm run dev
 ```
 
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:8001/docs
-- MotionEye: http://localhost:8765
-
 ## Development
-- **Backend code:** `backend/`
+- **Backend code:** `wildlife-app/backend/`
 - **Frontend code:** `wildlife-app/`
-- **Components:** `components/`
-- **API types:** `types/`
-- **Scripts:** `scripts/`
+- **Components:** `wildlife-app/components/`
+- **API types:** `wildlife-app/types/`
+- **Scripts:** `wildlife-app/scripts/`
+
+## Startup Scripts (Windows)
+
+The repository includes several Windows batch scripts for easy service management:
+
+- **`wildlife-app-control.bat`** - Interactive control center with menu (Start/Stop/Status)
+- **`start-wildlife-app.bat`** - One-click startup for all services
+- **`stop-wildlife-app.bat`** - One-click shutdown for all services
+- **`start-wildlife-app-simple.bat`** - Minimal startup script (alternative)
+- **`stop-wildlife-app.ps1`** - PowerShell version of stop script
+
+All scripts automatically:
+- Check for Docker and start it if needed
+- Start Docker services (PostgreSQL & MotionEye)
+- Launch Backend and Frontend in separate windows
+- Provide clear status messages
 
 ## Environment Variables
 - See `.env` or set:

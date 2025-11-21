@@ -41,7 +41,9 @@ const CameraList: React.FC = () => {
       fetchCameras(); // Refresh the list after sync
     } catch (error: any) {
       console.error('Error syncing cameras:', error);
-      toast.error(error.response?.data?.detail || "Failed to sync cameras from MotionEye");
+      // Provide more helpful error messages
+      const errorMessage = error.message || error.response?.data?.detail || "Failed to sync cameras from MotionEye";
+      toast.error(errorMessage);
     }
   }, [fetchCameras]);
 

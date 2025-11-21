@@ -175,10 +175,22 @@ export async function getCameraStream(cameraId: number) {
 
 export async function syncCamerasFromMotionEye() {
   try {
-    const response = await axios.post(`${API_URL}/cameras/sync`)
+    const response = await axios.post(`${API_URL}/cameras/sync`, {}, {
+      timeout: 30000, // 30 second timeout
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    })
     return response.data
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error syncing cameras from MotionEye:', error)
+    // Provide more helpful error messages
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      throw new Error('Request timed out. Please check if the backend server is running.')
+    }
+    if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
+      throw new Error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+    }
     throw error
   }
 }
