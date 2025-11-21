@@ -33,9 +33,9 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
 
 ### 🚀 Easiest Method: Use the Control Center (Recommended)
 
-**For Windows users**, we've created convenient startup scripts:
+**For Windows users**, we've created convenient startup scripts in the `scripts/` folder:
 
-1. **Double-click `wildlife-app-control.bat`** - This opens a menu-driven control center
+1. **Navigate to the `scripts/` folder** and **double-click `wildlife-app-control.bat`** - This opens a menu-driven control center
 2. Select option **`[1] Start All Services`** - This will:
    - Check and start Docker (if needed)
    - Start Docker services (PostgreSQL & MotionEye)
@@ -43,9 +43,11 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
    - Launch Frontend server (port 3000)
 3. When done, select option **`[2] Stop All Services`** to cleanly shut everything down
 
-**Alternative scripts:**
+**Alternative scripts in `scripts/` folder:**
 - `start-wildlife-app.bat` - Simple one-click startup (starts everything)
 - `stop-wildlife-app.bat` - One-click shutdown (stops everything)
+
+See `scripts/README.md` for detailed information about all available scripts.
 
 ### Manual Setup (Alternative)
 
@@ -112,19 +114,21 @@ npm run dev
 
 ## Startup Scripts (Windows)
 
-The repository includes several Windows batch scripts for easy service management:
+All startup and shutdown scripts are organized in the `scripts/` folder for easy access:
 
-- **`wildlife-app-control.bat`** - Interactive control center with menu (Start/Stop/Status)
-- **`start-wildlife-app.bat`** - One-click startup for all services
-- **`stop-wildlife-app.bat`** - One-click shutdown for all services
-- **`start-wildlife-app-simple.bat`** - Minimal startup script (alternative)
-- **`stop-wildlife-app.ps1`** - PowerShell version of stop script
+- **`scripts/wildlife-app-control.bat`** ⭐ - Interactive control center with menu (Start/Stop/Status)
+- **`scripts/start-wildlife-app.bat`** - One-click startup for all services
+- **`scripts/stop-wildlife-app.bat`** - One-click shutdown for all services
+- **`scripts/start-wildlife-app-simple.bat`** - Minimal startup script (alternative)
+- **`scripts/stop-wildlife-app.ps1`** - PowerShell version of stop script
 
 All scripts automatically:
 - Check for Docker and start it if needed
 - Start Docker services (PostgreSQL & MotionEye)
 - Launch Backend and Frontend in separate windows
 - Provide clear status messages
+
+See `scripts/README.md` for detailed documentation on all scripts.
 
 ## Environment Variables
 - See `.env` or set:
