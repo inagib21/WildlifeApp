@@ -1,6 +1,6 @@
 # Wildlife App Startup Scripts
 
-This folder contains all the Windows batch and PowerShell scripts for managing the Wildlife App services.
+This folder contains the Windows batch scripts for managing the Wildlife App services.
 
 ## 🚀 Quick Start
 
@@ -8,35 +8,14 @@ This folder contains all the Windows batch and PowerShell scripts for managing t
 
 ## Available Scripts
 
-### Main Scripts
-
-- **`wildlife-app-control.bat`** ⭐ **RECOMMENDED**
+- **`wildlife-app-control.bat`** ⭐ **MAIN SCRIPT**
   - Interactive menu with Start/Stop/Status options
-  - Best for daily use
   - Handles all services automatically
-
-- **`start-wildlife-app.bat`**
-  - One-click startup for all services
-  - Starts Docker, Backend, and Frontend
-  - Opens separate windows for each service
+  - Best for daily use
 
 - **`stop-wildlife-app.bat`**
-  - One-click shutdown for all services
-  - Stops Docker containers and processes
-
-### Alternative Scripts
-
-- **`start-wildlife-app-simple.bat`**
-  - Minimal startup script (no Docker checks)
-  - Alternative if main script has issues
-
-- **`start-wildlife-app-fixed.bat`**
-  - Fixed version that uses Python directly
-  - Use if venv path issues occur
-
-- **`stop-wildlife-app.ps1`**
-  - PowerShell version of stop script
-  - Alternative to batch file
+  - Quick one-click shutdown for all services
+  - Use if you need to stop services quickly without opening the control center
 
 ## Usage
 

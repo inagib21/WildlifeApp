@@ -43,9 +43,8 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
    - Launch Frontend server (port 3000)
 3. When done, select option **`[2] Stop All Services`** to cleanly shut everything down
 
-**Alternative scripts in `scripts/` folder:**
-- `start-wildlife-app.bat` - Simple one-click startup (starts everything)
-- `stop-wildlife-app.bat` - One-click shutdown (stops everything)
+**Additional script:**
+- `scripts/stop-wildlife-app.bat` - Quick one-click shutdown (if you need to stop without opening control center)
 
 See `scripts/README.md` for detailed information about all available scripts.
 
@@ -114,21 +113,18 @@ npm run dev
 
 ## Startup Scripts (Windows)
 
-All startup and shutdown scripts are organized in the `scripts/` folder for easy access:
+All startup and shutdown scripts are organized in the `scripts/` folder:
 
-- **`scripts/wildlife-app-control.bat`** ⭐ - Interactive control center with menu (Start/Stop/Status)
-- **`scripts/start-wildlife-app.bat`** - One-click startup for all services
-- **`scripts/stop-wildlife-app.bat`** - One-click shutdown for all services
-- **`scripts/start-wildlife-app-simple.bat`** - Minimal startup script (alternative)
-- **`scripts/stop-wildlife-app.ps1`** - PowerShell version of stop script
+- **`scripts/wildlife-app-control.bat`** ⭐ **MAIN SCRIPT** - Interactive control center with menu (Start/Stop/Status)
+- **`scripts/stop-wildlife-app.bat`** - Quick one-click shutdown (optional)
 
-All scripts automatically:
-- Check for Docker and start it if needed
-- Start Docker services (PostgreSQL & MotionEye)
-- Launch Backend and Frontend in separate windows
-- Provide clear status messages
+The control center automatically:
+- Checks for Docker and starts it if needed
+- Starts Docker services (PostgreSQL & MotionEye)
+- Launches Backend and Frontend in separate windows
+- Provides clear status messages
 
-See `scripts/README.md` for detailed documentation on all scripts.
+See `scripts/README.md` for detailed documentation.
 
 ## Environment Variables
 - See `.env` or set:
