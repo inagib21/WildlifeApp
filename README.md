@@ -109,7 +109,7 @@ npm run dev
 - **Frontend code:** `wildlife-app/`
 - **Components:** `wildlife-app/components/`
 - **API types:** `wildlife-app/types/`
-- **Scripts:** `wildlife-app/scripts/`
+- **Startup Scripts:** `scripts/` (Windows batch scripts for easy service management)
 
 ## Startup Scripts (Windows)
 
