@@ -6,11 +6,23 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
 export const getCameras = async () => {
   try {
     const response = await axios.get(`${API_URL}/cameras`, {
-      timeout: 60000 // 60 second timeout
+      timeout: 60000, // 60 second timeout
+      headers: {
+        'Content-Type': 'application/json'
+      }
     })
     return response.data
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error fetching cameras:', error)
+    // Provide more helpful error messages
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      console.error('Request timed out. Please check if the backend server is running.')
+    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
+      console.error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+      console.error(`Attempted URL: ${API_URL}/cameras`)
+    } else if (error.response) {
+      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+    }
     return []
   }
 }
@@ -188,8 +200,16 @@ export async function syncCamerasFromMotionEye() {
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
       throw new Error('Request timed out. Please check if the backend server is running.')
     }
-    if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
+    if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_CONNECTION_REFUSED')) {
       throw new Error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+    }
+    // Check if it's an axios error with no response (backend not running)
+    if (error.response === undefined && error.request !== undefined) {
+      throw new Error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+    }
+    // If backend returned an error, pass it through
+    if (error.response?.data?.detail) {
+      throw new Error(error.response.data.detail)
     }
     throw error
   }

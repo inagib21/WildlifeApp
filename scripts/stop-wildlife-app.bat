@@ -27,12 +27,20 @@ if errorlevel 1 (
 )
 
 echo.
-echo Stopping Python processes (Backend)...
+echo Stopping Backend processes...
+REM First try to stop by window title (more specific)
+taskkill /FI "WINDOWTITLE eq Wildlife Backend*" /F /T >nul 2>&1
+timeout /t 1 /nobreak >nul
+REM Then kill any remaining Python processes on port 8001
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8001" ^| findstr "LISTENING"') do (
+    taskkill /F /PID %%a >nul 2>&1
+)
+REM Fallback: kill all Python processes (be careful!)
 taskkill /F /IM python.exe /T 2>nul
 if errorlevel 1 (
     echo No Python processes found.
 ) else (
-    echo Python processes stopped.
+    echo Backend processes stopped.
 )
 
 echo.

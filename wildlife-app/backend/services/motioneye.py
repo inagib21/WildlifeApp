@@ -1,0 +1,114 @@
+"""MotionEye integration service"""
+import logging
+import requests
+from typing import List, Optional, Dict, Any
+
+try:
+    from ..config import MOTIONEYE_URL
+except ImportError:
+    from config import MOTIONEYE_URL
+
+
+class MotionEyeClient:
+    """Client for interacting with MotionEye API"""
+    
+    def __init__(self, base_url: str = MOTIONEYE_URL):
+        self.base_url = base_url
+        self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=0  # No retries, fail fast
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+    
+    def get_cameras(self) -> List[Dict[str, Any]]:
+        """Get list of cameras from MotionEye"""
+        try:
+            response = self.session.get(f"{self.base_url}/config/list", timeout=(1, 1))
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("cameras", [])
+            return []
+        except requests.exceptions.Timeout:
+            # MotionEye not responding - log at debug level, not error
+            logging.debug(f"MotionEye timeout (may not be running): {self.base_url}")
+            return []
+        except requests.exceptions.ConnectionError:
+            # MotionEye not accessible - log at debug level
+            logging.debug(f"MotionEye connection error (may not be running): {self.base_url}")
+            return []
+        except Exception as e:
+            # Only log actual errors at error level
+            logging.warning(f"Error getting cameras from MotionEye: {e}")
+            return []
+    
+    def add_camera(self, camera_config: Dict[str, Any]) -> bool:
+        """Add a camera to MotionEye"""
+        try:
+            response = self.session.post(f"{self.base_url}/config/add", json=camera_config)
+            return response.status_code == 200
+        except Exception as e:
+            logging.error(f"Error adding camera to MotionEye: {e}")
+            return False
+    
+    def update_camera(self, camera_id: int, camera_config: Dict[str, Any]) -> bool:
+        """Update a camera in MotionEye"""
+        try:
+            response = self.session.post(f"{self.base_url}/config/{camera_id}/set", json=camera_config)
+            return response.status_code == 200
+        except Exception as e:
+            logging.error(f"Error updating camera in MotionEye: {e}")
+            return False
+    
+    def delete_camera(self, camera_id: int) -> bool:
+        """Delete a camera from MotionEye"""
+        try:
+            response = self.session.post(f"{self.base_url}/config/{camera_id}/remove")
+            return response.status_code == 200
+        except Exception as e:
+            logging.error(f"Error deleting camera from MotionEye: {e}")
+            return False
+    
+    def get_camera_stream_url(self, camera_id: int) -> str:
+        """Get the stream URL for a camera"""
+        return f"http://localhost:8765/picture/{camera_id}/current/"
+    
+    def get_camera_mjpeg_url(self, camera_id: int) -> str:
+        """Get the MJPEG stream URL for a camera"""
+        return f"http://localhost:8765/picture/{camera_id}/current/"
+    
+    def get_camera_config(self, camera_id: int) -> Optional[Dict[str, Any]]:
+        """Get full camera configuration from MotionEye"""
+        try:
+            response = self.session.get(f"{self.base_url}/config/{camera_id}/get", timeout=(2, 2))
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            logging.error(f"Error getting camera config from MotionEye: {e}")
+            return None
+    
+    def set_motion_settings(self, camera_id: int, motion_settings: Dict[str, Any]) -> bool:
+        """Update motion detection settings for a camera"""
+        try:
+            # Get current config first
+            current_config = self.get_camera_config(camera_id)
+            if not current_config:
+                return False
+            
+            # Update with motion settings
+            current_config.update(motion_settings)
+            
+            # Send updated config
+            response = self.session.post(f"{self.base_url}/config/{camera_id}/set", json=current_config, timeout=(2, 2))
+            return response.status_code == 200
+        except Exception as e:
+            logging.error(f"Error setting motion settings in MotionEye: {e}")
+            return False
+
+
+# Global MotionEye client instance
+motioneye_client = MotionEyeClient()
+

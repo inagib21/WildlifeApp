@@ -37,8 +37,10 @@ Simply double-click any `.bat` file in this folder.
 ### Startup Scripts
 1. Check Docker status and start if needed
 2. Start Docker services (PostgreSQL & MotionEye)
-3. Launch Backend server (FastAPI on port 8001)
-4. Launch Frontend server (Next.js on port 3000)
+3. Verify backend files exist (main.py, config.py, database.py)
+4. Launch Backend server (FastAPI on port 8001)
+5. Launch Frontend server (Next.js on port 3000)
+6. Perform health checks to verify services started correctly
 
 ### Stop Scripts
 1. Stop Docker containers
@@ -67,4 +69,11 @@ After starting services, access:
 - Check that Docker Desktop is installed and running
 - Verify Python and Node.js are in your PATH
 - Check the service windows for error messages
+- Ensure all backend modules exist (config.py, database.py, models.py, services/, utils/, routers/)
+
+### Network Error in Frontend
+- Wait 10-15 seconds after starting services for backend to fully initialize
+- Check backend window for error messages
+- Verify backend is accessible: http://localhost:8001/health
+- Check browser console for detailed error messages
 

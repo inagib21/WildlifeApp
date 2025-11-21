@@ -82,8 +82,24 @@ if errorlevel 1 (
     goto MAIN_MENU
 )
 
-start "Wildlife Backend" cmd /k "title Wildlife Backend && cd /d %CD%\backend && echo ======================================== && echo   Wildlife Backend Server && echo ======================================== && echo Directory: %CD%\backend && echo. && python -m uvicorn main:app --host 0.0.0.0 --port 8001 --reload && echo. && echo Backend stopped. && pause"
-timeout /t 2 /nobreak >nul
+REM Verify backend files exist
+if not exist "%~dp0..\wildlife-app\backend\main.py" (
+    echo ERROR: Backend main.py not found!
+    echo Expected: %~dp0..\wildlife-app\backend\main.py
+    pause
+    goto MAIN_MENU
+)
+
+if not exist "%~dp0..\wildlife-app\backend\config.py" (
+    echo WARNING: config.py not found - backend may have issues
+)
+
+if not exist "%~dp0..\wildlife-app\backend\database.py" (
+    echo WARNING: database.py not found - backend may have issues
+)
+
+start "Wildlife Backend" cmd /k "title Wildlife Backend && cd /d "%~dp0..\wildlife-app\backend" && echo ======================================== && echo   Wildlife Backend Server && echo ======================================== && echo Directory: %CD% && echo. && echo Starting FastAPI server on port 8001... && echo. && python -m uvicorn main:app --host 0.0.0.0 --port 8001 --reload && echo. && echo Backend stopped. Press any key to close... && pause >nul"
+timeout /t 3 /nobreak >nul
 echo Backend window opened.
 
 REM Start Frontend
@@ -96,8 +112,16 @@ if errorlevel 1 (
     goto MAIN_MENU
 )
 
-start "Wildlife Frontend" cmd /k "title Wildlife Frontend && cd /d %CD% && echo ======================================== && echo   Wildlife Frontend Server && echo ======================================== && echo Directory: %CD% && echo. && npm run dev && echo. && echo Frontend stopped. && pause"
-timeout /t 2 /nobreak >nul
+REM Verify frontend files exist
+if not exist "%~dp0..\wildlife-app\package.json" (
+    echo ERROR: Frontend package.json not found!
+    echo Expected: %~dp0..\wildlife-app\package.json
+    pause
+    goto MAIN_MENU
+)
+
+start "Wildlife Frontend" cmd /k "title Wildlife Frontend && cd /d "%~dp0..\wildlife-app" && echo ======================================== && echo   Wildlife Frontend Server && echo ======================================== && echo Directory: %CD% && echo. && echo Starting Next.js dev server on port 3000... && echo. && npm run dev && echo. && echo Frontend stopped. Press any key to close... && pause >nul"
+timeout /t 3 /nobreak >nul
 echo Frontend window opened.
 
 echo.
@@ -113,6 +137,24 @@ echo.
 echo Windows opened:
 echo   - "Wildlife Backend" 
 echo   - "Wildlife Frontend"
+echo.
+echo Waiting for services to initialize...
+timeout /t 5 /nobreak >nul
+
+REM Quick health check (using PowerShell since curl may not be available)
+echo.
+echo Verifying services...
+powershell -Command "try { $response = Invoke-WebRequest -Uri 'http://localhost:8001/health' -UseBasicParsing -TimeoutSec 2; if ($response.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
+if errorlevel 1 (
+    echo WARNING: Backend health check failed - may still be starting
+    echo          Wait a few seconds and check http://localhost:8001/health
+) else (
+    echo Backend health check: OK
+)
+
+echo.
+echo NOTE: If you see network errors in the frontend, wait a few
+echo       seconds for the backend to fully initialize.
 echo.
 echo Press any key to return to menu...
 pause >nul
@@ -191,6 +233,13 @@ if errorlevel 1 (
         echo   Port 8001: Not listening
     ) else (
         echo   Port 8001: Listening
+        REM Try health check
+        powershell -Command "try { $response = Invoke-WebRequest -Uri 'http://localhost:8001/health' -UseBasicParsing -TimeoutSec 2; if ($response.StatusCode -eq 200) { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>&1
+        if errorlevel 1 (
+            echo   Health Check: FAILED (may be starting)
+        ) else (
+            echo   Health Check: OK
+        )
     )
 )
 echo.

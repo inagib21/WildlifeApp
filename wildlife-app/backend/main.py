@@ -1,10 +1,8 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, func, text, Index
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from sqlalchemy import func, text, Index
+from sqlalchemy.orm import Session
+from typing import List, Optional, Dict, Any, Any as AnyType
 from datetime import datetime, timedelta
 import os
 import psutil
@@ -29,11 +27,27 @@ from fastapi.responses import JSONResponse
 import queue
 import uuid
 from collections import defaultdict
-from sqlalchemy import text
 import hashlib
 from pathlib import Path
 import aiofiles
 from hashlib import sha256
+
+# Import from new modular structure
+try:
+    from config import DATABASE_URL, MOTIONEYE_URL, SPECIESNET_URL, THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD, ALLOWED_ORIGINS
+    from database import engine, SessionLocal, Base, Camera, Detection
+    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings
+    from utils.caching import get_cached, set_cached
+    from services.motioneye import motioneye_client
+    from services.speciesnet import speciesnet_processor
+except ImportError:
+    # Fallback for direct execution
+    from config import DATABASE_URL, MOTIONEYE_URL, SPECIESNET_URL, THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD, ALLOWED_ORIGINS
+    from database import engine, SessionLocal, Base, Camera, Detection
+    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings
+    from utils.caching import get_cached, set_cached
+    from services.motioneye import motioneye_client
+    from services.speciesnet import speciesnet_processor
 
 try:
     from .camera_sync import CameraSyncService, sync_motioneye_cameras
@@ -58,11 +72,17 @@ configure_access_logs()
 
 app = FastAPI()
 
+# Rate limiting middleware - protect against API abuse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS middleware - restrict to specific origins and methods for security
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000"
-).split(",")
+# ALLOWED_ORIGINS is imported from config
 
 app.add_middleware(
     CORSMiddleware,
@@ -223,246 +243,8 @@ class EventManager:
 # Global event manager
 event_manager = EventManager()
 
-# Database setup - PostgreSQL (Docker)
-# Use environment variables for security - defaults for local development only
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "wildlife")
-
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-)
-MOTIONEYE_URL = os.getenv("MOTIONEYE_URL", "http://localhost:8765")
-SPECIESNET_URL = os.getenv("SPECIESNET_URL", "http://localhost:8000")
-
-# Camera authentication credentials (from environment variables)
-THINGINO_CAMERA_USERNAME = os.getenv("THINGINO_CAMERA_USERNAME", "root")
-THINGINO_CAMERA_PASSWORD = os.getenv("THINGINO_CAMERA_PASSWORD", "ismart12")
-
-# Configure connection pooling for better performance
-from sqlalchemy.pool import QueuePool
-
-engine = create_engine(
-    DATABASE_URL,
-    poolclass=QueuePool,
-    pool_size=10,           # Number of connections to maintain
-    max_overflow=20,        # Additional connections when pool is exhausted
-    pool_pre_ping=True,     # Verify connections before using
-    pool_recycle=3600,      # Recycle connections after 1 hour
-    echo=False
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-# Add error handling for database connection
-try:
-    # Test the connection
-    with engine.connect() as conn:
-        pass
-    print("Successfully connected to PostgreSQL database")
-except Exception as e:
-    print(f"Warning: Error connecting to database: {e}")
-    print("Database connection will be retried during startup")
-    # Don't raise here - let the startup event handle it
-
 # Migration: add file_hash column if not present - moved to startup event
 from sqlalchemy import inspect
-
-# SpeciesNet integration
-class SpeciesNetProcessor:
-    def __init__(self):
-        self.confidence_threshold = 0.5
-        self.server_url = SPECIESNET_URL
-        self.session = requests.Session()
-        # Configure connection pooling with NO retries
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10,
-            pool_maxsize=20,
-            max_retries=0  # No retries, fail fast
-        )
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
-    
-    def process_image(self, image_path: str) -> Dict[str, Any]:
-        try:
-            if not os.path.exists(image_path):
-                raise ValueError(f"Could not read image: {image_path}")
-            with open(image_path, 'rb') as f:
-                files = {'file': (os.path.basename(image_path), f, 'image/jpeg')}
-                response = self.session.post(
-                    f"{self.server_url}/predict",
-                    files=files,
-                    timeout=(10, 30)  # 10s connect, 30s read (SpeciesNet needs more time)
-                )
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    logging.error(f"SpeciesNet server error: {response.status_code} - {response.text}")
-                    return {"error": f"Server error: {response.status_code}"}
-        except requests.exceptions.Timeout:
-            logging.error(f"SpeciesNet timeout for {image_path}")
-            return {"error": "Request timeout"}
-        except Exception as e:
-            logging.error(f"Error processing image {image_path}: {str(e)}")
-            return {"error": str(e)}
-    
-    def get_status(self) -> str:
-        try:
-            response = self.session.get(f"{self.server_url}/health", timeout=(5, 5))
-            if response.status_code == 200:
-                return "running"
-            else:
-                return "error"
-        except requests.exceptions.Timeout:
-            return "timeout"
-        except Exception:
-            return "not_available"
-
-# Global SpeciesNet processor
-speciesnet_processor = SpeciesNetProcessor()
-
-# MotionEye integration
-class MotionEyeClient:
-    def __init__(self, base_url: str = MOTIONEYE_URL):
-        self.base_url = base_url
-        self.session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=10,
-            pool_maxsize=20,
-            max_retries=0  # No retries, fail fast
-        )
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
-    
-    def get_cameras(self) -> List[Dict[str, Any]]:
-        try:
-            response = self.session.get(f"{self.base_url}/config/list", timeout=(1, 1))
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("cameras", [])
-            return []
-        except Exception as e:
-            print(f"Error getting cameras from MotionEye: {e}")
-            return []
-    
-    def add_camera(self, camera_config: Dict[str, Any]) -> bool:
-        """Add a camera to MotionEye"""
-        try:
-            response = self.session.post(f"{self.base_url}/config/add", json=camera_config)
-            return response.status_code == 200
-        except Exception as e:
-            print(f"Error adding camera to MotionEye: {e}")
-            return False
-    
-    def update_camera(self, camera_id: int, camera_config: Dict[str, Any]) -> bool:
-        """Update a camera in MotionEye"""
-        try:
-            response = self.session.post(f"{self.base_url}/config/{camera_id}/set", json=camera_config)
-            return response.status_code == 200
-        except Exception as e:
-            print(f"Error updating camera in MotionEye: {e}")
-            return False
-    
-    def delete_camera(self, camera_id: int) -> bool:
-        """Delete a camera from MotionEye"""
-        try:
-            response = self.session.post(f"{self.base_url}/config/{camera_id}/remove")
-            return response.status_code == 200
-        except Exception as e:
-            print(f"Error deleting camera from MotionEye: {e}")
-            return False
-    
-    def get_camera_stream_url(self, camera_id: int) -> str:
-        """Get the stream URL for a camera"""
-        return f"http://localhost:8765/picture/{camera_id}/current/"
-    
-    def get_camera_mjpeg_url(self, camera_id: int) -> str:
-        """Get the MJPEG stream URL for a camera"""
-        return f"http://localhost:8765/picture/{camera_id}/current/"
-    
-    def get_camera_config(self, camera_id: int) -> Optional[Dict[str, Any]]:
-        """Get full camera configuration from MotionEye"""
-        try:
-            response = self.session.get(f"{self.base_url}/config/{camera_id}/get", timeout=(2, 2))
-            if response.status_code == 200:
-                return response.json()
-            return None
-        except Exception as e:
-            print(f"Error getting camera config from MotionEye: {e}")
-            return None
-    
-    def set_motion_settings(self, camera_id: int, motion_settings: Dict[str, Any]) -> bool:
-        """Update motion detection settings for a camera"""
-        try:
-            # Get current config first
-            current_config = self.get_camera_config(camera_id)
-            if not current_config:
-                return False
-            
-            # Update with motion settings
-            current_config.update(motion_settings)
-            
-            # Send updated config
-            response = self.session.post(f"{self.base_url}/config/{camera_id}/set", json=current_config, timeout=(2, 2))
-            return response.status_code == 200
-        except Exception as e:
-            print(f"Error setting motion settings in MotionEye: {e}")
-            return False
-
-# Global MotionEye client
-motioneye_client = MotionEyeClient()
-
-# Database Models
-class Camera(Base):
-    __tablename__ = "cameras"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, index=True)
-    url = Column(String)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    # MotionEye configuration fields
-    width = Column(Integer, default=1280)
-    height = Column(Integer, default=720)
-    framerate = Column(Integer, default=30)
-    stream_port = Column(Integer, default=8081)
-    stream_quality = Column(Integer, default=100)
-    stream_maxrate = Column(Integer, default=30)
-    stream_localhost = Column(Boolean, default=False)
-    detection_enabled = Column(Boolean, default=True)
-    detection_threshold = Column(Integer, default=1500)
-    detection_smart_mask_speed = Column(Integer, default=10)
-    movie_output = Column(Boolean, default=True)
-    movie_quality = Column(Integer, default=100)
-    movie_codec = Column(String, default="mkv")
-    snapshot_interval = Column(Integer, default=0)
-    target_dir = Column(String, default="./motioneye_media")
-
-class Detection(Base):
-    __tablename__ = "detections"
-    __table_args__ = (
-        # Composite indexes for common query patterns
-        Index('idx_detection_camera_timestamp', 'camera_id', 'timestamp'),
-        Index('idx_detection_timestamp_desc', 'timestamp'),
-        Index('idx_detection_species', 'species'),
-        # Index for file hash deduplication (already has index=True on column)
-    )
-    id = Column(Integer, primary_key=True, index=True)
-    camera_id = Column(Integer, ForeignKey("cameras.id"), index=True)  # Add index for foreign key lookups
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)  # Add index for time-based queries
-    species = Column(String, index=True)  # Add index for species filtering
-    confidence = Column(Float)
-    image_path = Column(String)
-    file_size = Column(Integer, nullable=True)
-    image_width = Column(Integer, nullable=True)
-    image_height = Column(Integer, nullable=True)
-    image_quality = Column(Integer, nullable=True)
-    # SpeciesNet specific fields
-    prediction_score = Column(Float, nullable=True)
-    detections_json = Column(Text, nullable=True)  # Store full detection data as JSON
-    file_hash = Column(String, nullable=True, index=True)  # SHA256 hash of file for deduplication
 
 # Camera sync service
 def _get_sync_interval() -> int:
@@ -690,67 +472,7 @@ async def run_photo_scanner_once():
     except Exception as e:
         print(f"Photo scanner initial sync error: {e}")
 
-# Pydantic models
-class CameraBase(BaseModel):
-    name: str
-    url: str
-    is_active: bool = True
-    width: int = 1280
-    height: int = 720
-    framerate: int = 30
-    stream_port: int = 8081
-    stream_quality: int = 100
-    stream_maxrate: int = 30
-    stream_localhost: bool = False
-    detection_enabled: bool = True
-    detection_threshold: int = 1500
-    detection_smart_mask_speed: int = 10
-    movie_output: bool = True
-    movie_quality: int = 100
-    movie_codec: str = "mkv"
-    snapshot_interval: int = 0
-    target_dir: str = "./motioneye_media"
-
-class CameraCreate(CameraBase):
-    pass
-
-class CameraResponse(CameraBase):
-    id: int
-    created_at: datetime
-    stream_url: Optional[str] = None
-    mjpeg_url: Optional[str] = None
-    detection_count: Optional[int] = None
-    last_detection: Optional[str] = None
-    status: Optional[str] = None
-    location: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-class DetectionBase(BaseModel):
-    camera_id: int
-    species: str
-    confidence: float
-    image_path: str
-    file_size: Optional[int] = None
-    image_width: Optional[int] = None
-    image_height: Optional[int] = None
-    image_quality: Optional[int] = None
-    prediction_score: Optional[float] = None
-    detections_json: Optional[str] = None
-
-class DetectionCreate(DetectionBase):
-    pass
-
-class DetectionResponse(DetectionBase):
-    id: int
-    timestamp: datetime
-    full_taxonomy: Optional[str] = None  # Add full taxonomy field
-    media_url: Optional[str] = None
-    camera_name: str
-
-    class Config:
-        from_attributes = True
+# Pydantic models are now imported from models.py
 
 # Dependency
 def get_db():
@@ -776,8 +498,14 @@ def health_check_api():
     return health_check()
 
 @app.get("/system")
-async def get_system_health() -> Dict[str, Any]:
+@limiter.limit("60/minute")  # Rate limit: 60 requests per minute (frequently polled)
+async def get_system_health(request: Request) -> Dict[str, Any]:
     """Get system health and status information - returns quickly even if some services are slow"""
+    # Check cache first (5 second TTL for system health)
+    cached = get_cached("system_health", ttl=5)
+    if cached:
+        return cached
+    
     import asyncio
     from datetime import datetime
     import psutil
@@ -868,7 +596,7 @@ async def get_system_health() -> Dict[str, Any]:
             speciesnet_status = "error"
         
         # Compose response immediately
-        return {
+        result = {
             "status": "running",
             "system": {
                 "cpu_percent": cpu_percent,
@@ -884,6 +612,10 @@ async def get_system_health() -> Dict[str, Any]:
                 "status": speciesnet_status
             }
         }
+        
+        # Cache the result for 5 seconds
+        set_cached("system_health", result, ttl=5)
+        return result
     except Exception as e:
         # Return error response instead of raising exception to avoid 500
         return {
@@ -905,95 +637,113 @@ async def get_system_health() -> Dict[str, Any]:
         }
 
 @app.get("/api/system")
-async def get_system_health_api() -> Dict[str, Any]:
+@limiter.limit("60/minute")  # Rate limit: 60 requests per minute
+async def get_system_health_api(request: Request) -> Dict[str, Any]:
     """Alias for /system to support frontend API calls"""
-    return await get_system_health()
+    return await get_system_health(request)
 
 @app.get("/cameras", response_model=List[CameraResponse])
-def get_cameras(db: Session = Depends(get_db)):
-    cameras = db.query(Camera).all()
-    
-    # Optimize: Get all detection counts in a single query (avoid N+1 problem)
-    camera_ids = [camera.id for camera in cameras]
-    
-    # Get detection counts for all cameras at once
-    detection_counts = {}
-    if camera_ids:
-        from sqlalchemy import func
-        counts_query = db.query(
-            Detection.camera_id,
-            func.count(Detection.id).label('count')
-        ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).all()
+@limiter.limit("120/minute")  # Rate limit: 120 requests per minute
+def get_cameras(request: Request, db: Session = Depends(get_db)):
+    """Get list of all cameras"""
+    try:
+        # Check cache first (30 second TTL for camera list)
+        cached = get_cached("cameras_list", ttl=30)
+        if cached:
+            return cached
         
-        detection_counts = {camera_id: count for camera_id, count in counts_query}
-    
-    # Get last detection timestamps for all cameras at once (most recent per camera)
-    last_detections = {}
-    if camera_ids:
-        # Use a subquery to get the max timestamp per camera, then join to get the full detection
-        subquery = db.query(
-            Detection.camera_id,
-            func.max(Detection.timestamp).label('max_timestamp')
-        ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).subquery()
+        cameras = db.query(Camera).all()
         
-        last_detections_query = db.query(Detection).join(
-            subquery,
-            (Detection.camera_id == subquery.c.camera_id) & 
-            (Detection.timestamp == subquery.c.max_timestamp)
-        ).all()
+        # Optimize: Get all detection counts in a single query (avoid N+1 problem)
+        camera_ids = [camera.id for camera in cameras]
         
-        last_detections = {det.camera_id: det.timestamp.isoformat() for det in last_detections_query}
-    
-    # Convert to response models with defaults for None values
-    result = []
-    for camera in cameras:
-        # Get detection statistics from pre-fetched data
-        detection_count = detection_counts.get(camera.id, 0)
-        last_detection_time = last_detections.get(camera.id)
+        # Get detection counts for all cameras at once
+        detection_counts = {}
+        if camera_ids:
+            from sqlalchemy import func
+            counts_query = db.query(
+                Detection.camera_id,
+                func.count(Detection.id).label('count')
+            ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).all()
+            
+            detection_counts = {camera_id: count for camera_id, count in counts_query}
         
-        # Determine status based on is_active
-        status = "active" if (camera.is_active if camera.is_active is not None else True) else "inactive"
+        # Get last detection timestamps for all cameras at once (most recent per camera)
+        last_detections = {}
+        if camera_ids:
+            # Use a subquery to get the max timestamp per camera, then join to get the full detection
+            subquery = db.query(
+                Detection.camera_id,
+                func.max(Detection.timestamp).label('max_timestamp')
+            ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).subquery()
+            
+            last_detections_query = db.query(Detection).join(
+                subquery,
+                (Detection.camera_id == subquery.c.camera_id) & 
+                (Detection.timestamp == subquery.c.max_timestamp)
+            ).all()
+            
+            last_detections = {det.camera_id: det.timestamp.isoformat() for det in last_detections_query}
         
-        # Ensure all fields have proper defaults if None
-        camera_dict = {
-            "id": camera.id,
-            "name": camera.name,
-            "url": camera.url or "",
-            "is_active": camera.is_active if camera.is_active is not None else True,
-            "width": camera.width if camera.width is not None else 1280,
-            "height": camera.height if camera.height is not None else 720,
-            "framerate": camera.framerate if camera.framerate is not None else 30,
-            "stream_port": camera.stream_port if camera.stream_port is not None else 8081,
-            "stream_quality": camera.stream_quality if camera.stream_quality is not None else 100,
-            "stream_maxrate": camera.stream_maxrate if camera.stream_maxrate is not None else 30,
-            "stream_localhost": camera.stream_localhost if camera.stream_localhost is not None else False,
-            "detection_enabled": camera.detection_enabled if camera.detection_enabled is not None else True,
-            "detection_threshold": camera.detection_threshold if camera.detection_threshold is not None else 1500,
-            "detection_smart_mask_speed": camera.detection_smart_mask_speed if camera.detection_smart_mask_speed is not None else 10,
-            "movie_output": camera.movie_output if camera.movie_output is not None else True,
-            "movie_quality": camera.movie_quality if camera.movie_quality is not None else 100,
-            "movie_codec": camera.movie_codec if camera.movie_codec is not None else "mkv",
-            "snapshot_interval": camera.snapshot_interval if camera.snapshot_interval is not None else 0,
-            "target_dir": camera.target_dir if camera.target_dir is not None else "./motioneye_media",
-            "created_at": camera.created_at,
-            "stream_url": motioneye_client.get_camera_stream_url(camera.id) if camera.id else None,
-            "mjpeg_url": motioneye_client.get_camera_mjpeg_url(camera.id) if camera.id else None,
-            # Add detection statistics
-            "detection_count": detection_count,
-            "last_detection": last_detection_time,
-            "status": status,
-            "location": None,  # Can be added later if you track camera locations
-        }
-        result.append(camera_dict)
-    return result
+        # Convert to response models with defaults for None values
+        result = []
+        for camera in cameras:
+            # Get detection statistics from pre-fetched data
+            detection_count = detection_counts.get(camera.id, 0)
+            last_detection_time = last_detections.get(camera.id)
+            
+            # Determine status based on is_active
+            status = "active" if (camera.is_active if camera.is_active is not None else True) else "inactive"
+            
+            # Ensure all fields have proper defaults if None
+            camera_dict = {
+                "id": camera.id,
+                "name": camera.name,
+                "url": camera.url or "",
+                "is_active": camera.is_active if camera.is_active is not None else True,
+                "width": camera.width if camera.width is not None else 1280,
+                "height": camera.height if camera.height is not None else 720,
+                "framerate": camera.framerate if camera.framerate is not None else 30,
+                "stream_port": camera.stream_port if camera.stream_port is not None else 8081,
+                "stream_quality": camera.stream_quality if camera.stream_quality is not None else 100,
+                "stream_maxrate": camera.stream_maxrate if camera.stream_maxrate is not None else 30,
+                "stream_localhost": camera.stream_localhost if camera.stream_localhost is not None else False,
+                "detection_enabled": camera.detection_enabled if camera.detection_enabled is not None else True,
+                "detection_threshold": camera.detection_threshold if camera.detection_threshold is not None else 1500,
+                "detection_smart_mask_speed": camera.detection_smart_mask_speed if camera.detection_smart_mask_speed is not None else 10,
+                "movie_output": camera.movie_output if camera.movie_output is not None else True,
+                "movie_quality": camera.movie_quality if camera.movie_quality is not None else 100,
+                "movie_codec": (camera.movie_codec.split(':')[0] if camera.movie_codec and ':' in camera.movie_codec else (camera.movie_codec[:50] if camera.movie_codec and len(camera.movie_codec) > 50 else camera.movie_codec)) if camera.movie_codec is not None else "mkv",
+                "snapshot_interval": camera.snapshot_interval if camera.snapshot_interval is not None else 0,
+                "target_dir": camera.target_dir if camera.target_dir is not None else "./motioneye_media",
+                "created_at": camera.created_at,
+                "stream_url": motioneye_client.get_camera_stream_url(camera.id) if camera.id else None,
+                "mjpeg_url": motioneye_client.get_camera_mjpeg_url(camera.id) if camera.id else None,
+                # Add detection statistics
+                "detection_count": detection_count,
+                "last_detection": last_detection_time,
+                "status": status,
+                "location": None,  # Can be added later if you track camera locations
+            }
+            result.append(camera_dict)
+        
+        # Cache the result for 30 seconds
+        set_cached("cameras_list", result, ttl=30)
+        return result
+    except Exception as e:
+        logging.error(f"Error in get_cameras: {e}", exc_info=True)
+        # Return empty list on error instead of crashing
+        return []
 
 @app.get("/api/cameras", response_model=List[CameraResponse])
-def get_cameras_api(db: Session = Depends(get_db)):
+@limiter.limit("120/minute")  # Rate limit: 120 requests per minute
+def get_cameras_api(request: Request, db: Session = Depends(get_db)):
     """Alias for /cameras to support frontend API calls"""
-    return get_cameras(db)
+    return get_cameras(request, db)
 
 @app.post("/cameras/sync")
-def sync_cameras_from_motioneye(db: Session = Depends(get_db)):
+@limiter.limit("10/minute")  # Rate limit: 10 requests per minute (expensive operation)
+def sync_cameras_from_motioneye(request: Request, db: Session = Depends(get_db)):
     """Sync cameras from MotionEye to database"""
     try:
         return sync_motioneye_cameras(db, motioneye_client, Camera)
@@ -1002,9 +752,10 @@ def sync_cameras_from_motioneye(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Error syncing cameras: {str(e)}")
 
 @app.post("/cameras", response_model=CameraResponse)
-def add_camera(camera: CameraCreate, db: Session = Depends(get_db)):
+@limiter.limit("20/minute")  # Rate limit: 20 requests per minute
+def add_camera(request: Request, camera: CameraCreate, db: Session = Depends(get_db)):
     # Create camera in database
-    db_camera = Camera(**camera.dict())
+    db_camera = Camera(**camera.model_dump())
     db.add(db_camera)
     db.commit()
     db.refresh(db_camera)
@@ -1153,14 +904,16 @@ def get_detections_api(
 
 @app.post("/detections", response_model=DetectionResponse)
 def create_detection(detection: DetectionCreate, db: Session = Depends(get_db)):
-    db_detection = Detection(**detection.dict())
+    db_detection = Detection(**detection.model_dump())
     db.add(db_detection)
     db.commit()
     db.refresh(db_detection)
     return db_detection
 
 @app.post("/process-image")
+@limiter.limit("10/minute")  # Rate limit: 10 requests per minute (expensive operation)
 async def process_image_with_speciesnet(
+    request: Request,
     file: UploadFile = File(...),
     camera_id: Optional[int] = None,
     db: Session = Depends(get_db)
@@ -1513,12 +1266,15 @@ def get_motion_settings(camera_id: int):
     return motion_settings
 
 @app.post("/cameras/{camera_id}/motion-settings")
-def update_motion_settings(camera_id: int, settings: Dict[str, Any]):
+@limiter.limit("30/minute")  # Rate limit: 30 requests per minute
+def update_motion_settings(request: Request, camera_id: int, settings: MotionSettings):
     """Update motion detection settings in MotionEye"""
-    success = motioneye_client.set_motion_settings(camera_id, settings)
+    # Convert Pydantic model to dict, excluding None values
+    settings_dict = settings.model_dump(exclude_none=True)
+    success = motioneye_client.set_motion_settings(camera_id, settings_dict)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to update motion settings")
-    return {"message": "Motion settings updated successfully", "settings": settings}
+    return {"message": "Motion settings updated successfully", "settings": settings_dict}
 
 @app.get("/stream/{camera_id}")
 def get_camera_stream(camera_id: int, db: Session = Depends(get_db)):
