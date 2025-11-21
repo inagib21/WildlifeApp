@@ -215,6 +215,79 @@ export async function syncCamerasFromMotionEye() {
   }
 }
 
+export interface AuditLog {
+  id: number
+  timestamp: string
+  action: string
+  resource_type: string
+  resource_id?: number
+  user_ip?: string
+  user_agent?: string
+  endpoint?: string
+  details?: string
+  success: boolean
+  error_message?: string
+}
+
+export interface AuditLogFilters {
+  limit?: number
+  offset?: number
+  action?: string
+  resource_type?: string
+  resource_id?: number
+  success_only?: boolean
+}
+
+export async function getAuditLogs(filters?: AuditLogFilters): Promise<AuditLog[]> {
+  try {
+    const params = new URLSearchParams()
+    
+    if (filters?.limit) {
+      params.append('limit', filters.limit.toString())
+    }
+    if (filters?.offset) {
+      params.append('offset', filters.offset.toString())
+    }
+    if (filters?.action) {
+      params.append('action', filters.action)
+    }
+    if (filters?.resource_type) {
+      params.append('resource_type', filters.resource_type)
+    }
+    if (filters?.resource_id) {
+      params.append('resource_id', filters.resource_id.toString())
+    }
+    if (filters?.success_only) {
+      params.append('success_only', 'true')
+    }
+    
+    const url = `${API_URL}/api/audit-logs${params.toString() ? `?${params.toString()}` : ''}`
+    
+    const response = await axios.get(url, {
+      timeout: 30000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching audit logs:', error)
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      throw new Error('Request timed out. Please check if the backend server is running.')
+    }
+    if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_CONNECTION_REFUSED')) {
+      throw new Error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+    }
+    if (error.response === undefined && error.request !== undefined) {
+      throw new Error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+    }
+    if (error.response?.data?.detail) {
+      throw new Error(error.response.data.detail)
+    }
+    throw error
+  }
+}
+
 export async function processImageWithSpeciesNet(file: File, cameraId?: number) {
   try {
     const formData = new FormData()

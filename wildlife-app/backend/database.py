@@ -72,6 +72,27 @@ class Detection(Base):
     file_hash = Column(String, nullable=True, index=True)  # SHA256 hash of file for deduplication
 
 
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index('idx_audit_timestamp', 'timestamp'),
+        Index('idx_audit_action', 'action'),
+        Index('idx_audit_user_ip', 'user_ip'),
+        Index('idx_audit_resource_type', 'resource_type'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+    action = Column(String, index=True, nullable=False)  # CREATE, UPDATE, DELETE, SYNC, etc.
+    resource_type = Column(String, index=True, nullable=False)  # camera, detection, motion_settings, etc.
+    resource_id = Column(Integer, nullable=True)  # ID of the affected resource
+    user_ip = Column(String, nullable=True)  # IP address of the user making the change
+    user_agent = Column(String, nullable=True)  # User agent string
+    endpoint = Column(String, nullable=True)  # API endpoint that was called
+    details = Column(Text, nullable=True)  # JSON string with additional details
+    success = Column(Boolean, default=True)  # Whether the action succeeded
+    error_message = Column(Text, nullable=True)  # Error message if action failed
+
+
 # Add error handling for database connection
 try:
     # Test the connection

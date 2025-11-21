@@ -196,3 +196,21 @@ class MotionSettings(BaseModel):
             raise ValueError('At least one motion setting must be provided')
         return self
 
+
+class AuditLogResponse(BaseModel):
+    """Response model for audit log entries"""
+    id: int
+    timestamp: datetime
+    action: str
+    resource_type: str
+    resource_id: Optional[int] = None
+    user_ip: Optional[str] = None
+    user_agent: Optional[str] = None
+    endpoint: Optional[str] = None
+    details: Optional[str] = None  # JSON string
+    success: bool
+    error_message: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+

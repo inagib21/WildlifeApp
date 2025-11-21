@@ -36,16 +36,18 @@ from hashlib import sha256
 try:
     from config import DATABASE_URL, MOTIONEYE_URL, SPECIESNET_URL, THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD, ALLOWED_ORIGINS
     from database import engine, SessionLocal, Base, Camera, Detection
-    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings
+    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings, AuditLogResponse
     from utils.caching import get_cached, set_cached
+    from utils.audit import log_audit_event, get_audit_logs
     from services.motioneye import motioneye_client
     from services.speciesnet import speciesnet_processor
 except ImportError:
     # Fallback for direct execution
     from config import DATABASE_URL, MOTIONEYE_URL, SPECIESNET_URL, THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD, ALLOWED_ORIGINS
     from database import engine, SessionLocal, Base, Camera, Detection
-    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings
+    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings, AuditLogResponse
     from utils.caching import get_cached, set_cached
+    from utils.audit import log_audit_event, get_audit_logs
     from services.motioneye import motioneye_client
     from services.speciesnet import speciesnet_processor
 
@@ -746,9 +748,31 @@ def get_cameras_api(request: Request, db: Session = Depends(get_db)):
 def sync_cameras_from_motioneye(request: Request, db: Session = Depends(get_db)):
     """Sync cameras from MotionEye to database"""
     try:
-        return sync_motioneye_cameras(db, motioneye_client, Camera)
+        result = sync_motioneye_cameras(db, motioneye_client, Camera)
+        # Log successful sync
+        log_audit_event(
+            db=db,
+            request=request,
+            action="SYNC",
+            resource_type="camera",
+            details={
+                "synced": result.get("synced", 0),
+                "updated": result.get("updated", 0),
+                "removed": result.get("removed", 0)
+            }
+        )
+        return result
     except Exception as e:
         db.rollback()
+        # Log failed sync
+        log_audit_event(
+            db=db,
+            request=request,
+            action="SYNC",
+            resource_type="camera",
+            success=False,
+            error_message=str(e)
+        )
         raise HTTPException(status_code=500, detail=f"Error syncing cameras: {str(e)}")
 
 @app.post("/cameras", response_model=CameraResponse)
@@ -785,11 +809,31 @@ def add_camera(request: Request, camera: CameraCreate, db: Session = Depends(get
         # Rollback database if MotionEye fails
         db.delete(db_camera)
         db.commit()
+        # Log failed camera creation
+        log_audit_event(
+            db=db,
+            request=request,
+            action="CREATE",
+            resource_type="camera",
+            success=False,
+            error_message="Failed to add camera to MotionEye",
+            details={"camera_name": camera.name}
+        )
         raise HTTPException(status_code=500, detail="Failed to add camera to MotionEye")
     
     # Add stream URLs
     db_camera.stream_url = motioneye_client.get_camera_stream_url(db_camera.id)
     db_camera.mjpeg_url = motioneye_client.get_camera_mjpeg_url(db_camera.id)
+    
+    # Log successful camera creation
+    log_audit_event(
+        db=db,
+        request=request,
+        action="CREATE",
+        resource_type="camera",
+        resource_id=db_camera.id,
+        details={"camera_name": camera.name, "url": camera.url}
+    )
     
     return db_camera
 
@@ -903,11 +947,22 @@ def get_detections_api(
     return get_detections(camera_id, limit, db)
 
 @app.post("/detections", response_model=DetectionResponse)
-def create_detection(detection: DetectionCreate, db: Session = Depends(get_db)):
+def create_detection(request: Request, detection: DetectionCreate, db: Session = Depends(get_db)):
     db_detection = Detection(**detection.model_dump())
     db.add(db_detection)
     db.commit()
     db.refresh(db_detection)
+    
+    # Log detection creation
+    log_audit_event(
+        db=db,
+        request=request,
+        action="CREATE",
+        resource_type="detection",
+        resource_id=db_detection.id,
+        details={"camera_id": detection.camera_id, "species": detection.species}
+    )
+    
     return db_detection
 
 @app.post("/process-image")
@@ -930,6 +985,16 @@ async def process_image_with_speciesnet(
         predictions = speciesnet_processor.process_image(temp_path)
         
         if "error" in predictions:
+            # Log failed processing
+            log_audit_event(
+                db=db,
+                request=request,
+                action="PROCESS",
+                resource_type="detection",
+                success=False,
+                error_message=predictions["error"],
+                details={"camera_id": camera_id}
+            )
             raise HTTPException(status_code=500, detail=predictions["error"])
         
         # Save detection to database
@@ -951,6 +1016,20 @@ async def process_image_with_speciesnet(
             db.commit()
             db.refresh(db_detection)
             
+            # Log successful processing
+            log_audit_event(
+                db=db,
+                request=request,
+                action="PROCESS",
+                resource_type="detection",
+                resource_id=db_detection.id,
+                details={
+                    "camera_id": camera_id,
+                    "species": pred.get("prediction", "Unknown"),
+                    "confidence": pred.get("prediction_score", 0.0)
+                }
+            )
+            
             return {
                 "detection": db_detection,
                 "predictions": predictions
@@ -959,10 +1038,20 @@ async def process_image_with_speciesnet(
             return {"predictions": predictions}
         
     except Exception as e:
+        # Log failed processing
+        log_audit_event(
+            db=db,
+            request=request,
+            action="PROCESS",
+            resource_type="detection",
+            success=False,
+            error_message=str(e),
+            details={"camera_id": camera_id}
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/thingino/capture")
-async def capture_thingino_image(camera_id: int, db: Session = Depends(get_db)):
+async def capture_thingino_image(request: Request, camera_id: int, db: Session = Depends(get_db)):
     """Capture an image from the Thingino camera and process it"""
     try:
         # Get camera information
@@ -1026,6 +1115,21 @@ async def capture_thingino_image(camera_id: int, db: Session = Depends(get_db)):
             db.commit()
             db.refresh(db_detection)
             
+            # Log successful capture
+            log_audit_event(
+                db=db,
+                request=request,
+                action="CAPTURE",
+                resource_type="detection",
+                resource_id=db_detection.id,
+                details={
+                    "camera_id": camera_id,
+                    "camera_name": camera.name,
+                    "species": species,
+                    "confidence": confidence
+                }
+            )
+            
             # Broadcast the new detection to connected clients
             detection_event = {
                 "id": db_detection.id,
@@ -1050,9 +1154,29 @@ async def capture_thingino_image(camera_id: int, db: Session = Depends(get_db)):
             }
             
         except requests.exceptions.RequestException as e:
+            # Log failed capture
+            log_audit_event(
+                db=db,
+                request=request,
+                action="CAPTURE",
+                resource_type="detection",
+                success=False,
+                error_message=f"Failed to connect to camera: {str(e)}",
+                details={"camera_id": camera_id}
+            )
             raise HTTPException(status_code=500, detail=f"Failed to connect to camera: {str(e)}")
         
     except Exception as e:
+        # Log failed capture
+        log_audit_event(
+            db=db,
+            request=request,
+            action="CAPTURE",
+            resource_type="detection",
+            success=False,
+            error_message=str(e),
+            details={"camera_id": camera_id}
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/thingino/image/{detection_id}")
@@ -1160,6 +1284,21 @@ async def thingino_webhook(request: Request, db: Session = Depends(get_db)):
             db.commit()
             db.refresh(db_detection)
             
+            # Log webhook detection
+            log_audit_event(
+                db=db,
+                request=request,
+                action="WEBHOOK",
+                resource_type="detection",
+                resource_id=db_detection.id,
+                details={
+                    "camera_id": camera_id,
+                    "species": detection_data["species"],
+                    "confidence": detection_data["confidence"],
+                    "source": "thingino_webhook"
+                }
+            )
+            
             print(f"Detection saved: ID={db_detection.id}, Species={detection_data['species']}, Confidence={detection_data['confidence']}")
             
             # Get camera information for broadcasting
@@ -1191,6 +1330,16 @@ async def thingino_webhook(request: Request, db: Session = Depends(get_db)):
         except Exception as e:
             import traceback
             print(f"ERROR processing detection: {e}")
+            # Log failed webhook processing
+            log_audit_event(
+                db=db,
+                request=request,
+                action="WEBHOOK",
+                resource_type="detection",
+                success=False,
+                error_message=str(e),
+                details={"source": "thingino_webhook", "camera_id": camera_id}
+            )
             traceback.print_exc()
             return {"status": "error", "message": str(e)}
         
@@ -1267,13 +1416,34 @@ def get_motion_settings(camera_id: int):
 
 @app.post("/cameras/{camera_id}/motion-settings")
 @limiter.limit("30/minute")  # Rate limit: 30 requests per minute
-def update_motion_settings(request: Request, camera_id: int, settings: MotionSettings):
+def update_motion_settings(request: Request, camera_id: int, settings: MotionSettings, db: Session = Depends(get_db)):
     """Update motion detection settings in MotionEye"""
     # Convert Pydantic model to dict, excluding None values
     settings_dict = settings.model_dump(exclude_none=True)
     success = motioneye_client.set_motion_settings(camera_id, settings_dict)
     if not success:
+        # Log failed update
+        log_audit_event(
+            db=db,
+            request=request,
+            action="UPDATE",
+            resource_type="motion_settings",
+            resource_id=camera_id,
+            success=False,
+            error_message="Failed to update motion settings in MotionEye"
+        )
         raise HTTPException(status_code=500, detail="Failed to update motion settings")
+    
+    # Log successful update
+    log_audit_event(
+        db=db,
+        request=request,
+        action="UPDATE",
+        resource_type="motion_settings",
+        resource_id=camera_id,
+        details=settings_dict
+    )
+    
     return {"message": "Motion settings updated successfully", "settings": settings_dict}
 
 @app.get("/stream/{camera_id}")
@@ -1520,6 +1690,22 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
         db.add(db_detection)
         db.commit()
         db.refresh(db_detection)
+        
+        # Log MotionEye webhook detection
+        log_audit_event(
+            db=db,
+            request=request,
+            action="WEBHOOK",
+            resource_type="detection",
+            resource_id=db_detection.id,
+            details={
+                "camera_id": camera_id,
+                "species": detection_data["species"],
+                "confidence": detection_data["confidence"],
+                "source": "motioneye_webhook",
+                "file_path": local_file_path
+            }
+        )
         
         logger.info(
             "Saved detection %s from camera %s (%s) species=%s confidence=%.2f",
@@ -2279,16 +2465,32 @@ def debug_file_system():
         return {"error": str(e)}
 
 @app.get("/api/trigger-photo-scan")
-async def trigger_photo_scan():
+async def trigger_photo_scan(request: Request, db: Session = Depends(get_db)):
     """Manually trigger photo scanner to process unprocessed photos"""
     try:
-        # Get database session
-        db = next(get_db())
         scanner = PhotoScanner(db)
         await scanner.scan_and_process()
-        db.close()
+        
+        # Log successful scan trigger
+        log_audit_event(
+            db=db,
+            request=request,
+            action="TRIGGER",
+            resource_type="photo_scan",
+            details={"triggered_by": "manual"}
+        )
+        
         return {"message": "Photo scan completed successfully"}
     except Exception as e:
+        # Log failed scan trigger
+        log_audit_event(
+            db=db,
+            request=request,
+            action="TRIGGER",
+            resource_type="photo_scan",
+            success=False,
+            error_message=str(e)
+        )
         raise HTTPException(status_code=500, detail=f"Photo scan failed: {str(e)}")
 
 @app.get("/api/photo-scan-status")
@@ -2393,6 +2595,57 @@ def analytics_detections_unique_species_count(
         result = conn.execute(text(sql))
         unique_species = result.scalar()
     return {"unique_species": unique_species}
+
+
+@app.get("/audit-logs", response_model=List[AuditLogResponse])
+@limiter.limit("60/minute")  # Rate limit: 60 requests per minute
+def get_audit_logs_endpoint(
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    action: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[int] = None,
+    success_only: bool = False,
+    db: Session = Depends(get_db)
+):
+    """Get audit logs with optional filtering"""
+    from datetime import datetime, timedelta
+    
+    # Optional date filtering (last 30 days by default if not specified)
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=30)
+    
+    logs = get_audit_logs(
+        db=db,
+        limit=limit,
+        offset=offset,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        start_date=start_date,
+        end_date=end_date,
+        success_only=success_only
+    )
+    
+    return logs
+
+
+@app.get("/api/audit-logs", response_model=List[AuditLogResponse])
+@limiter.limit("60/minute")  # Rate limit: 60 requests per minute
+def get_audit_logs_api(
+    request: Request,
+    limit: int = 100,
+    offset: int = 0,
+    action: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[int] = None,
+    success_only: bool = False,
+    db: Session = Depends(get_db)
+):
+    """API endpoint alias for audit logs"""
+    return get_audit_logs_endpoint(request, limit, offset, action, resource_type, resource_id, success_only, db)
+
 
 if __name__ == "__main__":
     import uvicorn
