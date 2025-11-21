@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, func, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, func, text, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
@@ -58,13 +58,18 @@ configure_access_logs()
 
 app = FastAPI()
 
-# CORS middleware
+# CORS middleware - restrict to specific origins and methods for security
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Specific methods only
+    allow_headers=["Content-Type", "Authorization", "X-API-Key"],  # Specific headers only
 )
 
 # Real-time event management
@@ -219,11 +224,36 @@ class EventManager:
 event_manager = EventManager()
 
 # Database setup - PostgreSQL (Docker)
-DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/wildlife"
+# Use environment variables for security - defaults for local development only
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "wildlife")
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+)
 MOTIONEYE_URL = os.getenv("MOTIONEYE_URL", "http://localhost:8765")
 SPECIESNET_URL = os.getenv("SPECIESNET_URL", "http://localhost:8000")
 
-engine = create_engine(DATABASE_URL)
+# Camera authentication credentials (from environment variables)
+THINGINO_CAMERA_USERNAME = os.getenv("THINGINO_CAMERA_USERNAME", "root")
+THINGINO_CAMERA_PASSWORD = os.getenv("THINGINO_CAMERA_PASSWORD", "ismart12")
+
+# Configure connection pooling for better performance
+from sqlalchemy.pool import QueuePool
+
+engine = create_engine(
+    DATABASE_URL,
+    poolclass=QueuePool,
+    pool_size=10,           # Number of connections to maintain
+    max_overflow=20,        # Additional connections when pool is exhausted
+    pool_pre_ping=True,     # Verify connections before using
+    pool_recycle=3600,      # Recycle connections after 1 hour
+    echo=False
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -412,10 +442,17 @@ class Camera(Base):
 
 class Detection(Base):
     __tablename__ = "detections"
+    __table_args__ = (
+        # Composite indexes for common query patterns
+        Index('idx_detection_camera_timestamp', 'camera_id', 'timestamp'),
+        Index('idx_detection_timestamp_desc', 'timestamp'),
+        Index('idx_detection_species', 'species'),
+        # Index for file hash deduplication (already has index=True on column)
+    )
     id = Column(Integer, primary_key=True, index=True)
-    camera_id = Column(Integer, ForeignKey("cameras.id"))
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    species = Column(String)
+    camera_id = Column(Integer, ForeignKey("cameras.id"), index=True)  # Add index for foreign key lookups
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)  # Add index for time-based queries
+    species = Column(String, index=True)  # Add index for species filtering
     confidence = Column(Float)
     image_path = Column(String)
     file_size = Column(Integer, nullable=True)
@@ -425,7 +462,7 @@ class Detection(Base):
     # SpeciesNet specific fields
     prediction_score = Column(Float, nullable=True)
     detections_json = Column(Text, nullable=True)  # Store full detection data as JSON
-    file_hash = Column(String, nullable=True, index=True)  # New: SHA256 hash of file
+    file_hash = Column(String, nullable=True, index=True)  # SHA256 hash of file for deduplication
 
 # Camera sync service
 def _get_sync_interval() -> int:
@@ -1191,7 +1228,7 @@ async def capture_thingino_image(camera_id: int, db: Session = Depends(get_db)):
             # Try to get image from camera with authentication for Thingino cameras
             auth = None
             if camera_id in [9, 10]:  # Thingino cameras
-                auth = ("root", "ismart12")
+                auth = (THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD)
             
             response = requests.get(camera.url, auth=auth, timeout=10)
             if response.status_code != 200:
@@ -1311,7 +1348,7 @@ async def thingino_webhook(request: Request, db: Session = Depends(get_db)):
             # Use authentication for Thingino cameras
             auth = None
             if "192.168.88.93" in image_url or "192.168.88.97" in image_url:
-                auth = ("root", "ismart12")
+                auth = (THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD)
             
             response = requests.get(image_url, auth=auth, timeout=15)
             if response.status_code != 200:

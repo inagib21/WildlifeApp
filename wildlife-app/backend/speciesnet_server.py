@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="SpeciesNet Server", version="1.0.0")
 
-# Add CORS middleware
+# Add CORS middleware - restrict to backend server only
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8001", "http://127.0.0.1:8001"],  # Only backend
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["POST", "GET"],  # Only needed methods
+    allow_headers=["Content-Type"],  # Only needed headers
 )
 
 # Global SpeciesNet model
