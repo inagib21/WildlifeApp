@@ -1291,6 +1291,110 @@ async def process_image_with_speciesnet(
         )
         raise HTTPException(status_code=500, detail=str(e))
 
+
+async def _process_image_background(
+    task_id: str,
+    file: UploadFile,
+    camera_id: Optional[int],
+    compress: bool,
+    db: Session,
+    request: Request
+):
+    """Background task for processing images"""
+    try:
+        from services.task_tracker import task_tracker
+        
+        # Start task
+        task_tracker.start_task(task_id, "Reading image file...")
+        
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_path = temp_file.name
+        
+        # Update progress
+        task_tracker.update_task(task_id, progress=0.2, message="Processing with SpeciesNet...")
+        
+        # Process with SpeciesNet
+        predictions = speciesnet_processor.process_image(temp_path)
+        
+        if "error" in predictions:
+            task_tracker.fail_task(task_id, predictions["error"])
+            return
+        
+        task_tracker.update_task(task_id, progress=0.6, message="Saving detection...")
+        
+        # Save detection to database
+        if "predictions" in predictions and predictions["predictions"]:
+            pred = predictions["predictions"][0]
+            
+            detection_data = {
+                "camera_id": camera_id or 1,
+                "species": pred.get("prediction", "Unknown"),
+                "confidence": pred.get("prediction_score", 0.0),
+                "image_path": temp_path,
+                "detections_json": json.dumps(predictions),
+                "prediction_score": pred.get("prediction_score", 0.0)
+            }
+            
+            db_detection = Detection(**detection_data)
+            db.add(db_detection)
+            db.commit()
+            db.refresh(db_detection)
+            
+            task_tracker.update_task(task_id, progress=0.8, message="Compressing image...")
+            
+            # Compress image if enabled
+            if compress and db_detection.image_path and os.path.exists(db_detection.image_path):
+                try:
+                    from utils.image_compression import compress_image
+                    compress_image(
+                        db_detection.image_path,
+                        quality=85,
+                        max_width=1920,
+                        max_height=1080
+                    )
+                except Exception as e:
+                    logging.warning(f"Image compression failed: {e}")
+            
+            # Log successful processing
+            log_audit_event(
+                db=db,
+                request=request,
+                action="PROCESS",
+                resource_type="detection",
+                resource_id=db_detection.id,
+                details={
+                    "camera_id": camera_id,
+                    "species": pred.get("prediction", "Unknown"),
+                    "confidence": pred.get("prediction_score", 0.0),
+                    "task_id": task_id
+                }
+            )
+            
+            # Complete task
+            task_tracker.complete_task(
+                task_id,
+                result={
+                    "detection_id": db_detection.id,
+                    "species": pred.get("prediction", "Unknown"),
+                    "confidence": pred.get("prediction_score", 0.0)
+                },
+                message="Image processed successfully"
+            )
+        else:
+            task_tracker.complete_task(
+                task_id,
+                result={"predictions": predictions},
+                message="Processing completed (no detections)"
+            )
+    
+    except Exception as e:
+        logging.error(f"Background image processing failed: {e}", exc_info=True)
+        from services.task_tracker import task_tracker
+        task_tracker.fail_task(task_id, str(e))
+
 @app.post("/api/thingino/capture")
 async def capture_thingino_image(request: Request, camera_id: int, db: Session = Depends(get_db)):
     """Capture an image from the Thingino camera and process it"""
