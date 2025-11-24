@@ -789,4 +789,76 @@ export async function cleanupOldArchives(
     console.error('Error cleaning up archives:', error)
     throw new Error(error.response?.data?.detail || 'Failed to cleanup archives')
   }
+}
+
+export interface AdvancedMonitoring {
+  timestamp: string
+  disk_io: {
+    current: {
+      read_bytes: number
+      write_bytes: number
+      read_rate_bps: number
+      write_rate_bps: number
+    }
+    average: {
+      read_rate_bps: number
+      write_rate_bps: number
+    }
+    history_count: number
+  }
+  network_io: {
+    current: {
+      bytes_sent: number
+      bytes_recv: number
+      sent_rate_bps: number
+      recv_rate_bps: number
+    }
+    average: {
+      sent_rate_bps: number
+      recv_rate_bps: number
+    }
+    history_count: number
+  }
+  camera_health: Array<{
+    service: string
+    status: string
+    response_time_ms: number | null
+    cameras_count?: number
+    error?: string
+    timestamp: string
+  }>
+  speciesnet_health: {
+    service: string
+    status: string
+    response_time_ms: number | null
+    error?: string
+    timestamp: string
+  } | null
+  system_uptime: {
+    boot_time: string
+    uptime_seconds: number
+    uptime_days: number
+    uptime_hours: number
+    uptime_minutes: number
+  }
+  process_info?: {
+    cpu_percent: number
+    memory_mb: number
+    num_threads: number
+    create_time: string
+  }
+  error?: string
+  status?: string
+}
+
+export async function getAdvancedMonitoring(): Promise<AdvancedMonitoring> {
+  try {
+    const response = await axios.get(`${API_URL}/api/system/advanced`, {
+      timeout: 10000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching advanced monitoring:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch advanced monitoring')
+  }
 } 

@@ -1,11 +1,13 @@
 """System health and status endpoints"""
 from fastapi import APIRouter, Request
 from slowapi import Limiter
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import asyncio
 import os
 import psutil
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
+from collections import deque
 
 try:
     from ..services.motioneye import motioneye_client
@@ -15,6 +17,11 @@ except ImportError:
     from services.motioneye import motioneye_client
     from services.speciesnet import speciesnet_processor
     from utils.caching import get_cached, set_cached
+
+# Global storage for network/disk I/O metrics (simple in-memory tracking)
+_network_io_history = deque(maxlen=60)  # Store last 60 measurements (1 minute at 1/sec)
+_disk_io_history = deque(maxlen=60)
+_last_io_measurement = None
 
 router = APIRouter()
 
