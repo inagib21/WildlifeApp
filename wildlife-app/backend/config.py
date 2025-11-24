@@ -1,5 +1,6 @@
 """Configuration and environment variables"""
 import os
+import secrets
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -61,4 +62,9 @@ ARCHIVAL_RULES = {
 
 # API Key authentication configuration
 API_KEY_ENABLED = os.getenv("API_KEY_ENABLED", "false").lower() == "true"
+
+# Authentication configuration
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))  # Generate random key if not set
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+SESSION_EXPIRY_HOURS = int(os.getenv("SESSION_EXPIRY_HOURS", "24"))  # Session expires after 24 hours
 

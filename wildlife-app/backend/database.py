@@ -91,6 +91,7 @@ class AuditLog(Base):
     details = Column(Text, nullable=True)  # JSON string with additional details
     success = Column(Boolean, default=True)  # Whether the action succeeded
     error_message = Column(Text, nullable=True)  # Error message if action failed
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # Link to user who made the change
 
 
 class ApiKey(Base):
@@ -112,6 +113,44 @@ class ApiKey(Base):
     rate_limit_per_minute = Column(Integer, default=60)  # Per-key rate limiting
     allowed_ips = Column(Text, nullable=True)  # Comma-separated list of allowed IPs (optional)
     metadata = Column(Text, nullable=True)  # JSON string for additional metadata
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        Index('idx_user_email', 'email'),
+        Index('idx_user_username', 'username'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)  # bcrypt hashed password
+    full_name = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True, index=True)
+    is_superuser = Column(Boolean, default=False)  # Admin role
+    role = Column(String, default="viewer")  # viewer, editor, admin
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_login = Column(DateTime, nullable=True)
+    failed_login_attempts = Column(Integer, default=0)  # Track failed login attempts
+    locked_until = Column(DateTime, nullable=True)  # Account lockout until this time
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+    __table_args__ = (
+        Index('idx_session_token', 'token'),
+        Index('idx_session_user', 'user_id'),
+        Index('idx_session_expires', 'expires_at'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    token = Column(String, unique=True, index=True, nullable=False)  # JWT or session token
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_used_at = Column(DateTime, nullable=True)
+    ip_address = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
 
 
 # Add error handling for database connection
