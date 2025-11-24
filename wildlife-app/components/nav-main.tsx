@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { IconDashboard, IconCamera, IconAlertCircle, IconSettings, IconPlus, IconShield, IconFileText } from "@tabler/icons-react"
+import { IconDashboard, IconCamera, IconAlertCircle, IconSettings, IconPlus, IconShield, IconFileText, IconChartBar } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
 
 const items = [
@@ -30,6 +30,11 @@ const items = [
     title: "Audit Logs",
     href: "/audit-logs",
     icon: IconFileText,
+  },
+  {
+    title: "Analytics",
+    href: "/analytics",
+    icon: IconChartBar,
   },
   {
     title: "Settings",
