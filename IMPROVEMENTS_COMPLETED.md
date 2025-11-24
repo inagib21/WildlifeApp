@@ -628,6 +628,96 @@ All 14 improvements have been successfully implemented:
 
 ---
 
+---
+
+### 15. Advanced System Monitoring
+**Status:** ✅ Completed  
+**Date:** 2024
+
+**What was added:**
+- Advanced monitoring endpoint (`GET /api/system/advanced`)
+  - Disk I/O statistics:
+    - Current read/write rates (bytes per second)
+    - Average read/write rates over time
+    - Total bytes read/written
+    - Historical tracking (last 60 measurements)
+  - Network I/O statistics:
+    - Current sent/received rates (bytes per second)
+    - Average sent/received rates over time
+    - Total bytes sent/received
+    - Historical tracking (last 60 measurements)
+  - Camera health checks:
+    - MotionEye service response times
+    - Camera count and status
+    - Error tracking
+  - SpeciesNet health checks:
+    - Service response times
+    - Status monitoring
+    - Error tracking
+  - System uptime tracking:
+    - Boot time
+    - Uptime in seconds, days, hours, minutes
+  - Process information:
+    - CPU usage percentage
+    - Memory usage (MB)
+    - Thread count
+    - Process creation time
+- Real-time rate calculations:
+  - Automatic calculation of I/O rates between measurements
+  - Rolling averages for trend analysis
+  - Historical data storage (in-memory, last 60 seconds)
+
+**Files Modified:**
+- `wildlife-app/backend/routers/system.py` (advanced monitoring endpoint, I/O tracking)
+- `wildlife-app/lib/api.ts` (advanced monitoring API function and types)
+
+**Benefits:**
+- Proactive issue detection (identify performance problems before they become critical)
+- Performance optimization insights (understand system resource usage patterns)
+- Better system reliability (monitor service health and response times)
+- Network and disk usage monitoring (track bandwidth and storage I/O)
+- Service uptime tracking (know how long system has been running)
+- Historical trend analysis (identify patterns and anomalies)
+
+---
+
+## Updated Summary
+
+All 15 improvements have been successfully implemented:
+
+1. ✅ Disk Space Monitoring
+2. ✅ Data Export
+3. ✅ Email Notifications
+4. ✅ Search Functionality
+5. ✅ Automated Database Backups
+6. ✅ Image Compression
+7. ✅ Scheduled Automated Backups
+8. ✅ Bulk Delete Operations
+9. ✅ Image Thumbnails
+10. ✅ Advanced Analytics Dashboard
+11. ✅ Enhanced API Documentation
+12. ✅ Health Check Endpoints
+13. ✅ Automatic Audit Log Cleanup
+14. ✅ Image Archival System
+15. ✅ Advanced System Monitoring
+
+**Total Impact:**
+- **Security:** Enhanced monitoring and alerting
+- **Performance:** Image compression and thumbnails reduce storage and improve load times
+- **Usability:** Search, export, analytics, and bulk operations improve data management
+- **Reliability:** Automated backups protect against data loss
+- **Monitoring:** Comprehensive system health tracking with detailed metrics (CPU, memory, disk, network, services)
+- **Automation:** Scheduled tasks reduce manual maintenance (backups, log cleanup, archival)
+- **Insights:** Analytics dashboard provides visual data analysis
+- **Developer Experience:** API documentation enables easy integration
+- **Observability:** Health checks and advanced monitoring enable external monitoring integration
+- **Maintenance:** Automatic log cleanup prevents database bloat
+- **Organization:** Image archival system organizes and preserves important images
+- **Storage Management:** Configurable archival rules and cleanup capabilities
+- **Performance Analysis:** Advanced monitoring provides detailed I/O and network metrics
+
+---
+
 ## Next Steps
 
 For additional improvements, see `FUTURE_IMPROVEMENTS.md` for more enhancement ideas.
