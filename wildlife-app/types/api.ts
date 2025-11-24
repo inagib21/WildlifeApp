@@ -19,6 +19,7 @@ export interface Detection {
   confidence: number
   image_path: string
   media_url?: string
+  thumbnail_url?: string
   file_size?: number
   image_width?: number
   image_height?: number

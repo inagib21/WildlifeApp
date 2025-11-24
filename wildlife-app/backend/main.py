@@ -2550,6 +2550,20 @@ async def run_photo_scanner():
         print("Photo scanner sleeping for 15 minutes...")
         await asyncio.sleep(900)  # 15 minutes
 
+@app.get("/thumbnails/{filename}")
+def serve_thumbnail(filename: str):
+    """Serve thumbnail images"""
+    try:
+        thumbnail_path = os.path.join(THUMBNAIL_CACHE_DIR, filename)
+        if os.path.exists(thumbnail_path):
+            return FileResponse(thumbnail_path, media_type="image/jpeg")
+        else:
+            raise HTTPException(status_code=404, detail="Thumbnail not found")
+    except Exception as e:
+        logging.error(f"Error serving thumbnail: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/media/{camera}/{date}/{filename}")
 def serve_motioneye_media(camera: str, date: str, filename: str):
     """Serve motioneye media files"""
