@@ -147,6 +147,29 @@ See `scripts/README.md` for detailed documentation.
 - The backend calls a local SpeciesNet server for predictions.
 - For more on SpeciesNet, see the [official repo](https://github.com/google/cameratrapai).
 
+## Audit Logging
+
+The system includes comprehensive audit logging to track all system changes and activities. Every action is logged with:
+- **Who**: IP address and user agent
+- **What**: Action type and resource details
+- **When**: Precise timestamp
+- **Success/Failure**: Status and error messages
+
+**Access Audit Logs:**
+- **Frontend UI**: Navigate to "Audit Logs" in the sidebar or visit `http://localhost:3000/audit-logs`
+- **API**: `GET http://localhost:8001/api/audit-logs` with optional filters
+
+See `wildlife-app/backend/AUDIT_LOGS_GUIDE.md` for detailed documentation.
+
+## Future Improvements
+
+See `FUTURE_IMPROVEMENTS.md` for a comprehensive list of recommended enhancements including:
+- Email/SMS notifications for detections
+- Automated database backups
+- Disk space management
+- Data export and reporting
+- And many more...
+
 ## Requirements
 - All Python dependencies are listed in `requirements.txt` (auto-generated from the working environment).
 - Node.js dependencies are in `package.json`.
