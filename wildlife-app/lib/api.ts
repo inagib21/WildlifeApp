@@ -709,4 +709,84 @@ export async function getAuditLogStats(): Promise<{
     console.error('Error fetching audit log stats:', error)
     throw new Error(error.response?.data?.detail || 'Failed to fetch audit log stats')
   }
+}
+
+export interface ArchivalStats {
+  total_archived: number
+  by_species: Record<string, number>
+  by_camera: Record<string, number>
+  by_date: Record<string, number>
+  high_confidence_count: number
+  total_size_gb: number
+}
+
+export async function archiveImages(limit: number = 100): Promise<{
+  success: boolean
+  stats: {
+    processed: number
+    archived: number
+    skipped: number
+    errors: number
+  }
+  message: string
+}> {
+  try {
+    const response = await axios.post(
+      `${API_URL}/api/archival/archive`,
+      null,
+      {
+        params: { limit },
+        timeout: 300000  // 5 minutes for large batches
+      }
+    )
+    return response.data
+  } catch (error: any) {
+    console.error('Error archiving images:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to archive images')
+  }
+}
+
+export async function getArchivalStats(): Promise<ArchivalStats> {
+  try {
+    const response = await axios.get(`${API_URL}/api/archival/stats`, {
+      timeout: 10000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching archival stats:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch archival stats')
+  }
+}
+
+export async function cleanupOldArchives(
+  maxAgeDays: number = 365,
+  dryRun: boolean = false
+): Promise<{
+  success: boolean
+  stats: {
+    checked: number
+    deleted: number
+    errors: number
+    freed_gb: number
+  }
+  dry_run: boolean
+  message: string
+}> {
+  try {
+    const response = await axios.post(
+      `${API_URL}/api/archival/cleanup`,
+      null,
+      {
+        params: {
+          max_age_days: maxAgeDays,
+          dry_run: dryRun
+        },
+        timeout: 300000  // 5 minutes for large cleanup operations
+      }
+    )
+    return response.data
+  } catch (error: any) {
+    console.error('Error cleaning up archives:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to cleanup archives')
+  }
 } 

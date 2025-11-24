@@ -243,5 +243,50 @@ def initialize_scheduled_tasks():
     # Schedule audit log cleanup daily at 3:30 AM (90 day retention)
     schedule_audit_log_cleanup(retention_days=90, hour=3, minute=30)
     
+    # Schedule image archival daily at 4:00 AM (if enabled)
+    try:
+        from config import ARCHIVAL_ENABLED
+        if ARCHIVAL_ENABLED:
+            schedule_image_archival(hour=4, minute=0)
+    except ImportError:
+        pass  # Archival not configured
+    
     logger.info("Initialized default scheduled tasks")
+
+
+def schedule_image_archival(hour: int = 4, minute: int = 0, limit: int = 100):
+    """
+    Schedule automatic image archival
+    
+    Args:
+        hour: Hour of day to run archival
+        minute: Minute of hour to run archival
+        limit: Maximum number of detections to process per run
+    """
+    def archival_job():
+        try:
+            from database import SessionLocal
+            from services.archival import archival_service
+            
+            logger.info(f"Starting scheduled image archival (limit: {limit})")
+            db = SessionLocal()
+            try:
+                stats = archival_service.archive_detections(db, limit=limit)
+                logger.info(f"Scheduled image archival completed: {stats}")
+            except Exception as e:
+                logger.error(f"Scheduled image archival error: {e}", exc_info=True)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to run scheduled image archival: {e}", exc_info=True)
+    
+    scheduler = get_scheduler()
+    scheduler.scheduler.add_job(
+        archival_job,
+        trigger=CronTrigger(hour=hour, minute=minute),
+        id='image_archival',
+        name='Image Archival',
+        replace_existing=True
+    )
+    logger.info(f"Scheduled image archival daily at {hour:02d}:{minute:02d} (limit: {limit})")
 
