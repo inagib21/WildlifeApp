@@ -131,9 +131,9 @@ export function RealtimeDashboard() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 md:space-y-6">
       {/* Real-time status indicator */}
-      <div className="flex items-center justify-between p-4 bg-muted rounded-lg">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3 md:p-4 bg-muted rounded-lg">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold">Live Dashboard</h2>
           <div className="flex items-center gap-2">
@@ -172,7 +172,7 @@ export function RealtimeDashboard() {
         totalUniqueSpecies={totalUniqueSpecies ?? 0}
       />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
         <DetectionsChart />
         <DetectionsTimelineChart detections={allDetections} />
       </div>

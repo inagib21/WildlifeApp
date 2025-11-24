@@ -14,6 +14,7 @@ const inter = Inter({ subsets: ["latin"] })
 export const metadata: Metadata = {
   title: "Wildlife Camera System",
   description: "A system for managing wildlife cameras and detecting animals",
+  viewport: "width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes",
 }
 
 export default function RootLayout({
@@ -33,7 +34,7 @@ export default function RootLayout({
         >
           <SidebarProvider>
             <div className="flex min-h-screen">
-              <div className="w-64 border-r bg-background">
+              <div className="hidden md:block w-64 border-r bg-background">
                 <div className="flex h-full flex-col gap-2 p-4">
                   <div className="flex items-center justify-between mb-4">
                     <h1 className="text-xl font-bold">Wildlife</h1>
@@ -52,8 +53,15 @@ export default function RootLayout({
                   </div>
                 </div>
               </div>
-              <div className="flex-1">
-                <main className="p-6">
+              <div className="flex-1 w-full md:w-auto">
+                <div className="md:hidden p-3 border-b bg-background">
+                  <div className="flex items-center justify-between">
+                    <SidebarTrigger />
+                    <h1 className="text-lg font-bold">Wildlife</h1>
+                    <ThemeToggle />
+                  </div>
+                </div>
+                <main className="p-3 md:p-6">
                   {children}
                 </main>
               </div>
