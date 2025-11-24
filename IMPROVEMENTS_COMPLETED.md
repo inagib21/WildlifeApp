@@ -531,6 +531,103 @@ All 13 improvements have been successfully implemented:
 
 ---
 
+---
+
+### 14. Image Archival System
+**Status:** ✅ Completed  
+**Date:** 2024
+
+**What was added:**
+- Automatic image archival service (`services/archival.py`)
+  - Configurable archival rules (confidence threshold, age threshold, species filters)
+  - Multiple organization strategies:
+    - By species (organized by detected species)
+    - By camera (organized by camera name)
+    - By date (organized by year-month)
+    - High confidence (separate folder for high-confidence detections)
+  - Preserves original images (copies, doesn't move)
+- Manual archival endpoint (`POST /api/archival/archive`)
+  - Process detections in batches
+  - Configurable limit
+  - Returns statistics
+- Archival statistics endpoint (`GET /api/archival/stats`)
+  - Total archived count
+  - Counts by species, camera, date
+  - High confidence count
+  - Total storage size
+- Cleanup endpoint (`POST /api/archival/cleanup`)
+  - Remove old archived images based on age
+  - Dry-run mode for testing
+  - Returns freed space statistics
+- Scheduled automatic archival
+  - Daily archival at 4:00 AM (configurable)
+  - Integrated into scheduler system
+  - Only runs if `ARCHIVAL_ENABLED=true`
+- Environment configuration
+  - `ARCHIVAL_ENABLED`: Enable/disable archival
+  - `ARCHIVAL_ROOT`: Root directory for archives
+  - `ARCHIVAL_MIN_CONFIDENCE`: Minimum confidence threshold
+  - `ARCHIVAL_MIN_AGE_DAYS`: Minimum age before archiving
+  - `ARCHIVAL_HIGH_CONFIDENCE`: Archive high confidence separately
+  - `ARCHIVAL_BY_SPECIES`, `ARCHIVAL_BY_CAMERA`, `ARCHIVAL_BY_DATE`: Organization options
+  - `ARCHIVAL_SPECIES_WHITELIST`, `ARCHIVAL_SPECIES_BLACKLIST`: Species filtering
+
+**Files Created:**
+- `wildlife-app/backend/services/archival.py` (ImageArchivalService class)
+
+**Files Modified:**
+- `wildlife-app/backend/main.py` (archival endpoints)
+- `wildlife-app/backend/config.py` (archival configuration)
+- `wildlife-app/backend/services/scheduler.py` (scheduled archival job)
+- `wildlife-app/lib/api.ts` (archival API functions)
+- `wildlife-app/backend/ENV_SETUP.md` (archival environment variables)
+
+**Benefits:**
+- Organized image storage
+- Automatic preservation of important images
+- Configurable rules for what to archive
+- Easy retrieval by species, camera, or date
+- Storage management with cleanup capabilities
+- Reduces clutter in main media directories
+- Research and analysis capabilities
+
+---
+
+## Updated Summary
+
+All 14 improvements have been successfully implemented:
+
+1. ✅ Disk Space Monitoring
+2. ✅ Data Export
+3. ✅ Email Notifications
+4. ✅ Search Functionality
+5. ✅ Automated Database Backups
+6. ✅ Image Compression
+7. ✅ Scheduled Automated Backups
+8. ✅ Bulk Delete Operations
+9. ✅ Image Thumbnails
+10. ✅ Advanced Analytics Dashboard
+11. ✅ Enhanced API Documentation
+12. ✅ Health Check Endpoints
+13. ✅ Automatic Audit Log Cleanup
+14. ✅ Image Archival System
+
+**Total Impact:**
+- **Security:** Enhanced monitoring and alerting
+- **Performance:** Image compression and thumbnails reduce storage and improve load times
+- **Usability:** Search, export, analytics, and bulk operations improve data management
+- **Reliability:** Automated backups protect against data loss
+- **Monitoring:** Comprehensive system health tracking with detailed metrics
+- **Automation:** Scheduled tasks reduce manual maintenance (backups, log cleanup, archival)
+- **Insights:** Analytics dashboard provides visual data analysis
+- **Developer Experience:** API documentation enables easy integration
+- **Observability:** Health checks enable external monitoring integration
+- **Maintenance:** Automatic log cleanup prevents database bloat
+- **Organization:** Image archival system organizes and preserves important images
+- **Storage Management:** Configurable archival rules and cleanup capabilities
+
+---
+
 ## Next Steps
 
 For additional improvements, see `FUTURE_IMPROVEMENTS.md` for more enhancement ideas.
