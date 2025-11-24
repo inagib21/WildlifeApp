@@ -50,19 +50,49 @@ export const removeCamera = async (cameraId: number) => {
   return response.data
 }
 
-export async function getDetections(cameraId?: number, limit?: number): Promise<Detection[]> {
+export interface DetectionFilters {
+  cameraId?: number
+  limit?: number
+  offset?: number
+  species?: string
+  startDate?: string
+  endDate?: string
+  search?: string
+}
+
+export async function getDetections(filters?: DetectionFilters): Promise<Detection[]> {
   try {
     const params = new URLSearchParams()
     
-    if (cameraId) {
-      params.append('camera_id', cameraId.toString())
+    if (filters?.cameraId) {
+      params.append('camera_id', filters.cameraId.toString())
+    }
+    
+    if (filters?.species) {
+      params.append('species', filters.species)
+    }
+    
+    if (filters?.startDate) {
+      params.append('start_date', filters.startDate)
+    }
+    
+    if (filters?.endDate) {
+      params.append('end_date', filters.endDate)
+    }
+    
+    if (filters?.search) {
+      params.append('search', filters.search)
     }
     
     // Add default limit if not specified
-    if (typeof limit === 'number') {
-      params.append('limit', limit.toString())
+    if (filters?.limit) {
+      params.append('limit', filters.limit.toString())
     } else {
       params.append('limit', '50') // Default to 50 detections
+    }
+    
+    if (filters?.offset) {
+      params.append('offset', filters.offset.toString())
     }
     
     const url = `${API_URL}/detections?${params.toString()}`
@@ -75,6 +105,11 @@ export async function getDetections(cameraId?: number, limit?: number): Promise<
     console.error('Error fetching detections:', error)
     return []
   }
+}
+
+// Legacy function for backward compatibility
+export async function getDetectionsLegacy(cameraId?: number, limit?: number): Promise<Detection[]> {
+  return getDetections({ cameraId, limit })
 }
 
 export async function getDetectionsChunked(cameraId?: number, totalLimit: number = 2000): Promise<Detection[]> {
