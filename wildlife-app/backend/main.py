@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, text, Index
 from sqlalchemy.orm import Session
@@ -87,10 +87,74 @@ app = FastAPI(
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from fastapi.security import HTTPBearer
+from typing import Optional
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# API Key authentication (optional)
+security = HTTPBearer(auto_error=False)
+
+
+def get_api_key(
+    request: Request,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key")
+) -> Optional[str]:
+    """
+    Extract API key from request headers
+    
+    Supports:
+    - Authorization: Bearer <key>
+    - X-API-Key: <key>
+    """
+    # Try X-API-Key header first
+    if x_api_key:
+        return x_api_key
+    
+    # Try Authorization: Bearer <key>
+    if authorization and authorization.startswith("Bearer "):
+        return authorization.replace("Bearer ", "", 1)
+    
+    return None
+
+
+def verify_api_key(
+    request: Request,
+    api_key: Optional[str] = Depends(get_api_key),
+    db: Session = Depends(get_db)
+) -> Optional[Any]:
+    """
+    Verify API key if provided
+    
+    Returns:
+        ApiKey record if valid, None if no key provided (allows optional auth)
+    """
+    from config import API_KEY_ENABLED
+    
+    # If API key authentication is disabled, allow all requests
+    if not API_KEY_ENABLED:
+        return None
+    
+    # If no API key provided, return None (optional auth)
+    if not api_key:
+        return None
+    
+    # Validate API key
+    from services.api_keys import api_key_service
+    
+    client_ip = get_remote_address(request)
+    api_key_record = api_key_service.validate_key(db, api_key, client_ip=client_ip)
+    
+    if not api_key_record:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired API key"
+        )
+    
+    return api_key_record
 
 # CORS middleware - restrict to specific origins and methods for security
 # ALLOWED_ORIGINS is imported from config
