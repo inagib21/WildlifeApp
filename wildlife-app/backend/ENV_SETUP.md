@@ -46,6 +46,19 @@ NOTIFICATION_EMAIL_TO=recipient1@example.com,recipient2@example.com
 # - Weekly: Sunday 3:00 AM (configurable via API)
 # Backups are stored in: wildlife-app/backend/backups/
 # Old backups are automatically cleaned up (keeps 30 most recent)
+BACKUP_RETENTION_COUNT=10
+
+# Image Archival Configuration (optional)
+ARCHIVAL_ENABLED=false
+ARCHIVAL_ROOT=./archived_photos
+ARCHIVAL_MIN_CONFIDENCE=0.8
+ARCHIVAL_MIN_AGE_DAYS=30
+ARCHIVAL_HIGH_CONFIDENCE=true
+ARCHIVAL_BY_SPECIES=true
+ARCHIVAL_BY_CAMERA=true
+ARCHIVAL_BY_DATE=true
+ARCHIVAL_SPECIES_WHITELIST=
+ARCHIVAL_SPECIES_BLACKLIST=
 ```
 
 ## Security Notes
