@@ -262,6 +262,24 @@ export function DetectionsList() {
     }
   }
 
+  // Show SSE connection status indicator
+  const sseStatusIndicator = (
+    <div className="flex items-center gap-2 text-sm text-muted-foreground mb-2">
+      {sseConnected ? (
+        <>
+          <Wifi className="h-4 w-4 text-green-500" />
+          <span>Real-time updates active</span>
+        </>
+      ) : (
+        <>
+          <WifiOff className="h-4 w-4 text-yellow-500" />
+          <span>Real-time updates disconnected</span>
+          {sseError && <span className="text-xs">({sseError})</span>}
+        </>
+      )}
+    </div>
+  )
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -272,6 +290,8 @@ export function DetectionsList() {
           </div>
         </div>
       </div>
+      
+      {sseStatusIndicator}
       
       {/* Search and Export Controls */}
       <div className="flex items-center gap-4">
