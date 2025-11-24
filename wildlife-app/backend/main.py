@@ -2554,7 +2554,8 @@ async def run_photo_scanner():
 def serve_thumbnail(filename: str):
     """Serve thumbnail images"""
     try:
-        thumbnail_path = os.path.join(THUMBNAIL_CACHE_DIR, filename)
+        from utils.image_compression import THUMBNAIL_CACHE_DIR
+        thumbnail_path = os.path.join(str(THUMBNAIL_CACHE_DIR), filename)
         if os.path.exists(thumbnail_path):
             return FileResponse(thumbnail_path, media_type="image/jpeg")
         else:
