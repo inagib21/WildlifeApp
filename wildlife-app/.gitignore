@@ -46,9 +46,31 @@ archived_photos/
 
 # Python
 backend/venv/
+venv/
+env/
+ENV/
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
+*.py[cod]
+*$py.class
 *.so
+.Python
+*.db
+*.sqlite
+*.sqlite3
+wildlife.db
+
+# Test files
+test_*.py
+test-*.js
+temp-*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
