@@ -59,3 +59,6 @@ ARCHIVAL_RULES = {
     "species_blacklist": os.getenv("ARCHIVAL_SPECIES_BLACKLIST", "").split(",") if os.getenv("ARCHIVAL_SPECIES_BLACKLIST") else []
 }
 
+# API Key authentication configuration
+API_KEY_ENABLED = os.getenv("API_KEY_ENABLED", "false").lower() == "true"
+

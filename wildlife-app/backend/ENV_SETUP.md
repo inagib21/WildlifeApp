@@ -25,8 +25,11 @@ THINGINO_CAMERA_PASSWORD=your_camera_password_here
 # CORS Configuration (comma-separated)
 ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 
-# API Security (optional - leave empty to disable)
-API_KEY=your_api_key_here
+# API Key Authentication (optional)
+# Enable API key authentication (requires database table)
+API_KEY_ENABLED=false
+# Legacy single API key (if API_KEY_ENABLED=false, this can be used for simple auth)
+# API_KEY=your_api_key_here
 
 # MotionEye Sync Interval (seconds)
 MOTIONEYE_SYNC_INTERVAL_SECONDS=60

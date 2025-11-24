@@ -93,6 +93,27 @@ class AuditLog(Base):
     error_message = Column(Text, nullable=True)  # Error message if action failed
 
 
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        Index('idx_api_key_hash', 'key_hash'),
+        Index('idx_api_key_user', 'user_name'),
+        Index('idx_api_key_active', 'is_active'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    key_hash = Column(String, unique=True, index=True, nullable=False)  # SHA256 hash of the API key
+    user_name = Column(String, index=True, nullable=False)  # User/application name
+    description = Column(String, nullable=True)  # Optional description
+    is_active = Column(Boolean, default=True, index=True)  # Can be revoked
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_used_at = Column(DateTime, nullable=True)  # Track last usage
+    expires_at = Column(DateTime, nullable=True)  # Optional expiration date
+    usage_count = Column(Integer, default=0)  # Track usage
+    rate_limit_per_minute = Column(Integer, default=60)  # Per-key rate limiting
+    allowed_ips = Column(Text, nullable=True)  # Comma-separated list of allowed IPs (optional)
+    metadata = Column(Text, nullable=True)  # JSON string for additional metadata
+
+
 # Add error handling for database connection
 try:
     # Test the connection
@@ -102,4 +123,3 @@ try:
 except Exception as e:
     print(f"Warning: Error connecting to database: {e}")
     print("Database connection will be retried during startup")
-

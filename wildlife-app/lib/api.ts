@@ -964,4 +964,127 @@ export async function getTaskStats(): Promise<{
     console.error('Error fetching task stats:', error)
     throw new Error(error.response?.data?.detail || 'Failed to fetch task stats')
   }
+}
+
+export interface ApiKeyInfo {
+  id: number
+  user_name: string
+  description?: string | null
+  is_active: boolean
+  created_at: string | null
+  last_used_at: string | null
+  expires_at: string | null
+  usage_count: number
+  rate_limit_per_minute: number
+  allowed_ips?: string[] | null
+  is_expired: boolean
+}
+
+export async function createApiKey(
+  userName: string,
+  description?: string,
+  expiresInDays?: number,
+  rateLimitPerMinute: number = 60,
+  allowedIps?: string
+): Promise<{
+  api_key: string
+  key_hash: string
+  user_name: string
+  message: string
+}> {
+  try {
+    const params: any = {
+      user_name: userName,
+      rate_limit_per_minute: rateLimitPerMinute
+    }
+    if (description) params.description = description
+    if (expiresInDays) params.expires_in_days = expiresInDays
+    if (allowedIps) params.allowed_ips = allowedIps
+
+    const response = await axios.post(`${API_URL}/api/keys`, null, {
+      params,
+      timeout: 10000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error creating API key:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to create API key')
+  }
+}
+
+export async function listApiKeys(
+  userName?: string,
+  activeOnly: boolean = true,
+  limit: number = 100,
+  offset: number = 0
+): Promise<{
+  keys: ApiKeyInfo[]
+  total: number
+  limit: number
+  offset: number
+}> {
+  try {
+    const params = new URLSearchParams()
+    if (userName) params.append('user_name', userName)
+    params.append('active_only', activeOnly.toString())
+    params.append('limit', limit.toString())
+    params.append('offset', offset.toString())
+
+    const response = await axios.get(`${API_URL}/api/keys?${params.toString()}`, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error listing API keys:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to list API keys')
+  }
+}
+
+export async function getApiKeyStats(keyId: number): Promise<ApiKeyInfo> {
+  try {
+    const response = await axios.get(`${API_URL}/api/keys/${keyId}`, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching API key stats:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch API key stats')
+  }
+}
+
+export async function revokeApiKey(keyId: number): Promise<{ success: boolean; message: string }> {
+  try {
+    const response = await axios.post(`${API_URL}/api/keys/${keyId}/revoke`, null, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error revoking API key:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to revoke API key')
+  }
+}
+
+export async function rotateApiKey(
+  keyId: number,
+  userName: string,
+  description?: string
+): Promise<{
+  api_key: string
+  key_hash: string
+  user_name: string
+  message: string
+}> {
+  try {
+    const params: any = { user_name: userName }
+    if (description) params.description = description
+
+    const response = await axios.post(`${API_URL}/api/keys/${keyId}/rotate`, null, {
+      params,
+      timeout: 10000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error rotating API key:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to rotate API key')
+  }
 } 
