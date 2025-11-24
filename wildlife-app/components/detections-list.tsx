@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input"
 import Image from "next/image"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose } from "@/components/ui/dialog"
 import { toast } from "sonner"
-import { Download } from "lucide-react"
+import { Download, Wifi, WifiOff } from "lucide-react"
+import { useDetectionsRealtime } from "@/hooks/use-realtime"
 
 // Utility function to generate media URL from image path
 function generateMediaUrl(imagePath: string): string {
@@ -83,46 +84,42 @@ export function DetectionsList() {
     fetchPage()
   }, [page, searchQuery])
 
-  // Subscribe to real-time detection updates via SSE
-  React.useEffect(() => {
-    const eventSource = new EventSource(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}/events/detections`)
-    
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      console.log('New detection received:', data)
-      
-      // Skip keepalive messages
-      if (data.type === 'keepalive') {
-        return
-      }
-      
-      // Handle detection events
-      // Backend sends: { type: 'detection', data: detectionObject, timestamp: ... }
-      if (data.type === 'detection' && data.data) {
-        const newDetection = data.data
+  // Subscribe to real-time detection updates via SSE using the hook
+  const { isConnected: sseConnected, error: sseError } = useDetectionsRealtime((newDetection) => {
+    // Handle new detection from SSE
+    if (newDetection && newDetection.id) {
+      // Add the new detection to the list if we're on the first page and it matches search
+      if (page === 0) {
+        // Check if detection matches search query
+        const matchesSearch = !searchQuery || 
+          newDetection.species?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          newDetection.camera_name?.toLowerCase().includes(searchQuery.toLowerCase())
         
-        // Add the new detection to the list if we're on the first page
-        if (page === 0) {
-          setDetections((prev) => [newDetection, ...prev].slice(0, PAGE_SIZE))
+        if (matchesSearch) {
+          setDetections((prev) => {
+            // Avoid duplicates
+            if (prev.some(d => d.id === newDetection.id)) {
+              return prev
+            }
+            return [newDetection, ...prev].slice(0, PAGE_SIZE)
+          })
         }
-        
-        // Update the total count
-        setTotalCount((prev) => prev + 1)
-        
-        // Show notification
-        console.log(`New detection: ${newDetection.species} from Camera ${newDetection.camera_id}`)
+      }
+      
+      // Update the total count
+      setTotalCount((prev) => prev + 1)
+      
+      // Show toast notification for high-confidence detections
+      if (newDetection.confidence && newDetection.confidence >= 0.7) {
+        toast.success(
+          `New detection: ${newDetection.species || 'Unknown'} (${(newDetection.confidence * 100).toFixed(0)}% confidence)`,
+          {
+            description: `Camera: ${newDetection.camera_name || newDetection.camera_id}`
+          }
+        )
       }
     }
-    
-    eventSource.onerror = (error) => {
-      console.error('SSE error:', error)
-      // EventSource will auto-reconnect
-    }
-    
-    return () => {
-      eventSource.close()
-    }
-  }, [page])
+  })
 
   const pageCount = Math.ceil(totalCount / PAGE_SIZE)
 

@@ -108,13 +108,20 @@ export function useDetectionsRealtime(onNewDetection?: (detection: any) => void)
   
   return useRealtime(`${API_URL}/events/detections`, {
     onMessage: (data) => {
+      // Handle different event formats from backend
       if (data.type === 'detection') {
-        onNewDetection?.(data.data)
+        // Format: { type: 'detection', data: detectionObject, timestamp: ... }
+        onNewDetection?.(data.data || data.detection || data)
+      } else if (data.id && data.species !== undefined) {
+        // Direct detection object format
+        onNewDetection?.(data)
       }
     },
     onError: (error) => {
       console.error('Detections SSE error:', error)
-    }
+    },
+    reconnectInterval: 3000, // Faster reconnection for detections
+    maxReconnectAttempts: 10 // More attempts for critical real-time data
   })
 }
 
