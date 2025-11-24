@@ -7,6 +7,7 @@ import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from datetime import timedelta
 
 try:
     from ..services.backup import backup_service
@@ -186,6 +187,46 @@ def get_scheduler() -> TaskScheduler:
     return task_scheduler
 
 
+def schedule_audit_log_cleanup(retention_days: int = 90, hour: int = 3, minute: int = 0):
+    """
+    Schedule automatic cleanup of old audit logs
+    
+    Args:
+        retention_days: Number of days to keep logs
+        hour: Hour of day to run cleanup
+        minute: Minute of hour to run cleanup
+    """
+    def cleanup_job():
+        try:
+            from database import SessionLocal, AuditLog
+            from datetime import datetime, timedelta
+            
+            logger.info(f"Starting scheduled audit log cleanup (retention: {retention_days} days)")
+            db = SessionLocal()
+            try:
+                cutoff_date = datetime.now() - timedelta(days=retention_days)
+                deleted_count = db.query(AuditLog).filter(AuditLog.timestamp < cutoff_date).delete()
+                db.commit()
+                logger.info(f"Scheduled audit log cleanup completed: {deleted_count} log(s) deleted")
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Scheduled audit log cleanup error: {e}", exc_info=True)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to run scheduled audit log cleanup: {e}", exc_info=True)
+    
+    scheduler = get_scheduler()
+    scheduler.scheduler.add_job(
+        cleanup_job,
+        trigger=CronTrigger(hour=hour, minute=minute),
+        id='audit_log_cleanup',
+        name='Audit Log Cleanup',
+        replace_existing=True
+    )
+    logger.info(f"Scheduled audit log cleanup daily at {hour:02d}:{minute:02d} (retention: {retention_days} days)")
+
+
 def initialize_scheduled_tasks():
     """Initialize default scheduled tasks"""
     scheduler = get_scheduler()
@@ -196,8 +237,11 @@ def initialize_scheduled_tasks():
     # Schedule weekly backup on Sunday at 3 AM
     scheduler.schedule_weekly_backup(day_of_week=6, hour=3, minute=0)
     
-    # Schedule cleanup every 24 hours
+    # Schedule backup cleanup every 24 hours
     scheduler.schedule_cleanup(interval_hours=24)
+    
+    # Schedule audit log cleanup daily at 3:30 AM (90 day retention)
+    schedule_audit_log_cleanup(retention_days=90, hour=3, minute=30)
     
     logger.info("Initialized default scheduled tasks")
 

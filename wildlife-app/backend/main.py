@@ -2425,6 +2425,203 @@ def get_camera_analytics(
         raise HTTPException(status_code=500, detail=f"Failed to get camera analytics: {str(e)}")
 
 
+@app.get("/health")
+@limiter.limit("120/minute")
+def health_check(db: Session = Depends(get_db)):
+    """
+    Basic health check endpoint for monitoring tools
+    
+    Returns 200 if system is healthy, 503 if unhealthy
+    """
+    try:
+        # Check database connection
+        db.execute(text("SELECT 1"))
+        db_status = "healthy"
+    except Exception as e:
+        logging.error(f"Database health check failed: {e}")
+        db_status = "unhealthy"
+    
+    # Check MotionEye
+    try:
+        motioneye_status = motioneye_client.get_status()
+        motioneye_healthy = motioneye_status == "running"
+    except Exception:
+        motioneye_healthy = False
+    
+    # Check SpeciesNet
+    try:
+        speciesnet_status = speciesnet_processor.get_status()
+        speciesnet_healthy = speciesnet_status == "running"
+    except Exception:
+        speciesnet_healthy = False
+    
+    # Overall health
+    overall_healthy = db_status == "healthy"
+    
+    status_code = 200 if overall_healthy else 503
+    
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "healthy" if overall_healthy else "degraded",
+            "timestamp": datetime.now().isoformat(),
+            "dependencies": {
+                "database": {
+                    "status": db_status,
+                    "required": True
+                },
+                "motioneye": {
+                    "status": "healthy" if motioneye_healthy else "unhealthy",
+                    "required": False
+                },
+                "speciesnet": {
+                    "status": "healthy" if speciesnet_healthy else "unhealthy",
+                    "required": False
+                }
+            },
+            "uptime_seconds": time.time() - app.state.start_time if hasattr(app.state, 'start_time') else None
+        }
+    )
+
+
+@app.get("/api/health")
+@limiter.limit("120/minute")
+def health_check_api(db: Session = Depends(get_db)):
+    """Alias for /health endpoint"""
+    return health_check(db)
+
+
+@app.get("/health/detailed")
+@limiter.limit("60/minute")
+def detailed_health_check(db: Session = Depends(get_db)):
+    """
+    Detailed health check with metrics for monitoring tools
+    
+    Returns comprehensive system status including:
+    - Database connectivity and query performance
+    - MotionEye service status
+    - SpeciesNet service status
+    - System resources (CPU, memory, disk)
+    - Recent error counts
+    """
+    try:
+        # Database checks
+        db_start = time.time()
+        try:
+            db.execute(text("SELECT 1"))
+            db_query_time = (time.time() - db_start) * 1000  # milliseconds
+            db_status = "healthy"
+            db_error = None
+        except Exception as e:
+            db_status = "unhealthy"
+            db_query_time = None
+            db_error = str(e)
+        
+        # Get database stats
+        try:
+            detection_count = db.query(func.count(Detection.id)).scalar()
+            camera_count = db.query(func.count(Camera.id)).scalar()
+        except Exception:
+            detection_count = None
+            camera_count = None
+        
+        # MotionEye check
+        motioneye_start = time.time()
+        try:
+            motioneye_status = motioneye_client.get_status()
+            motioneye_response_time = (time.time() - motioneye_start) * 1000
+            motioneye_healthy = motioneye_status == "running"
+            motioneye_error = None
+        except Exception as e:
+            motioneye_healthy = False
+            motioneye_response_time = None
+            motioneye_error = str(e)
+        
+        # SpeciesNet check
+        speciesnet_start = time.time()
+        try:
+            speciesnet_status = speciesnet_processor.get_status()
+            speciesnet_response_time = (time.time() - speciesnet_start) * 1000
+            speciesnet_healthy = speciesnet_status == "running"
+            speciesnet_error = None
+        except Exception as e:
+            speciesnet_healthy = False
+            speciesnet_response_time = None
+            speciesnet_error = str(e)
+        
+        # System resources
+        try:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+        except Exception as e:
+            cpu_percent = None
+            memory = None
+            disk = None
+        
+        # Overall health
+        overall_healthy = db_status == "healthy"
+        status_code = 200 if overall_healthy else 503
+        
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "status": "healthy" if overall_healthy else "degraded",
+                "timestamp": datetime.now().isoformat(),
+                "dependencies": {
+                    "database": {
+                        "status": db_status,
+                        "required": True,
+                        "query_time_ms": db_query_time,
+                        "error": db_error,
+                        "stats": {
+                            "detections": detection_count,
+                            "cameras": camera_count
+                        }
+                    },
+                    "motioneye": {
+                        "status": "healthy" if motioneye_healthy else "unhealthy",
+                        "required": False,
+                        "response_time_ms": motioneye_response_time,
+                        "error": motioneye_error
+                    },
+                    "speciesnet": {
+                        "status": "healthy" if speciesnet_healthy else "unhealthy",
+                        "required": False,
+                        "response_time_ms": speciesnet_response_time,
+                        "error": speciesnet_error
+                    }
+                },
+                "system": {
+                    "cpu_percent": cpu_percent,
+                    "memory": {
+                        "total_gb": round(memory.total / (1024**3), 2) if memory else None,
+                        "used_gb": round(memory.used / (1024**3), 2) if memory else None,
+                        "available_gb": round(memory.available / (1024**3), 2) if memory else None,
+                        "percent": memory.percent if memory else None
+                    } if memory else None,
+                    "disk": {
+                        "total_gb": round(disk.total / (1024**3), 2) if disk else None,
+                        "used_gb": round(disk.used / (1024**3), 2) if disk else None,
+                        "free_gb": round(disk.free / (1024**3), 2) if disk else None,
+                        "percent": disk.percent if disk else None
+                    } if disk else None
+                },
+                "uptime_seconds": time.time() - app.state.start_time if hasattr(app.state, 'start_time') else None
+            }
+        )
+    except Exception as e:
+        logging.error(f"Detailed health check failed: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+
+
 class PhotoScanner:
     def __init__(self, db: Session):
         self.db = db

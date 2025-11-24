@@ -5,7 +5,7 @@ import { useEffect, useState } from "react"
 import { useSystemRealtime } from "@/hooks/use-realtime"
 import { Badge } from "@/components/ui/badge"
 import { Wifi, WifiOff, AlertCircle } from "lucide-react"
-import { getSystemHealth } from "@/lib/api"
+import { getSystemHealth, getHealthCheck } from "@/lib/api"
 
 interface SystemHealth {
   system: {

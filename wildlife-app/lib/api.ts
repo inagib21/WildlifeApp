@@ -609,4 +609,104 @@ export async function getCameraAnalytics(
     console.error('Error fetching camera analytics:', error)
     throw new Error(error.response?.data?.detail || 'Failed to fetch camera analytics')
   }
+}
+
+export interface HealthCheck {
+  status: 'healthy' | 'degraded' | 'error'
+  timestamp: string
+  dependencies: {
+    database: {
+      status: string
+      required: boolean
+      query_time_ms?: number
+      error?: string
+      stats?: {
+        detections: number | null
+        cameras: number | null
+      }
+    }
+    motioneye: {
+      status: string
+      required: boolean
+      response_time_ms?: number
+      error?: string
+    }
+    speciesnet: {
+      status: string
+      required: boolean
+      response_time_ms?: number
+      error?: string
+    }
+  }
+  system?: {
+    cpu_percent: number | null
+    memory: {
+      total_gb: number | null
+      used_gb: number | null
+      available_gb: number | null
+      percent: number | null
+    } | null
+    disk: {
+      total_gb: number | null
+      used_gb: number | null
+      free_gb: number | null
+      percent: number | null
+    } | null
+  }
+  uptime_seconds: number | null
+}
+
+export async function getHealthCheck(detailed: boolean = false): Promise<HealthCheck> {
+  try {
+    const endpoint = detailed ? '/health/detailed' : '/health'
+    const response = await axios.get(`${API_URL}${endpoint}`, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching health check:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch health check')
+  }
+}
+
+export async function cleanupAuditLogs(retentionDays: number = 90): Promise<{ deleted_count: number }> {
+  try {
+    const response = await axios.post(
+      `${API_URL}/api/audit-logs/cleanup`,
+      null,
+      {
+        params: { retention_days: retentionDays },
+        timeout: 30000
+      }
+    )
+    return response.data
+  } catch (error: any) {
+    console.error('Error cleaning up audit logs:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to cleanup audit logs')
+  }
+}
+
+export async function getAuditLogStats(): Promise<{
+  total_count: number
+  by_action: Record<string, number>
+  by_resource_type: Record<string, number>
+  success_rate: {
+    success: number
+    failure: number
+    success_percentage: number
+  }
+  date_range: {
+    oldest: string | null
+    newest: string | null
+  }
+}> {
+  try {
+    const response = await axios.get(`${API_URL}/api/audit-logs/stats`, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching audit log stats:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch audit log stats')
+  }
 } 
