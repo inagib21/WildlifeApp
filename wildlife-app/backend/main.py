@@ -908,6 +908,101 @@ def add_camera(request: Request, camera: CameraCreate, db: Session = Depends(get
     
     return db_camera
 
+@app.delete("/detections/{detection_id}")
+@limiter.limit("60/minute")
+def delete_detection(
+    request: Request,
+    detection_id: int,
+    db: Session = Depends(get_db)
+):
+    """Delete a single detection"""
+    try:
+        detection = db.query(Detection).filter(Detection.id == detection_id).first()
+        if not detection:
+            raise HTTPException(status_code=404, detail="Detection not found")
+        
+        # Log deletion
+        log_audit_event(
+            db=db,
+            request=request,
+            action="DELETE",
+            resource_type="detection",
+            resource_id=detection_id,
+            details={
+                "camera_id": detection.camera_id,
+                "species": detection.species
+            }
+        )
+        
+        db.delete(detection)
+        db.commit()
+        
+        return {"success": True, "message": f"Detection {detection_id} deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to delete detection {detection_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete detection: {str(e)}")
+
+
+@app.post("/detections/bulk-delete")
+@limiter.limit("10/minute")
+def bulk_delete_detections(
+    request: Request,
+    detection_ids: List[int],
+    db: Session = Depends(get_db)
+):
+    """Delete multiple detections"""
+    try:
+        if not detection_ids:
+            raise HTTPException(status_code=400, detail="No detection IDs provided")
+        
+        if len(detection_ids) > 100:
+            raise HTTPException(status_code=400, detail="Cannot delete more than 100 detections at once")
+        
+        # Get detections
+        detections = db.query(Detection).filter(Detection.id.in_(detection_ids)).all()
+        
+        if len(detections) != len(detection_ids):
+            found_ids = {d.id for d in detections}
+            missing_ids = set(detection_ids) - found_ids
+            raise HTTPException(
+                status_code=404,
+                detail=f"Some detections not found: {list(missing_ids)}"
+            )
+        
+        # Log bulk deletion
+        log_audit_event(
+            db=db,
+            request=request,
+            action="BULK_DELETE",
+            resource_type="detection",
+            details={
+                "count": len(detection_ids),
+                "detection_ids": detection_ids
+            }
+        )
+        
+        # Delete all
+        for detection in detections:
+            db.delete(detection)
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Deleted {len(detection_ids)} detection(s)",
+            "deleted_count": len(detection_ids)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to bulk delete detections: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete detections: {str(e)}")
+
+
 @app.get("/detections", response_model=List[DetectionResponse])
 def get_detections(
     camera_id: Optional[int] = None,
@@ -3049,6 +3144,14 @@ def cleanup_backups_endpoint(request: Request, keep_count: int = 10, db: Session
         logging.error(f"Backup cleanup failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
 
+
+# Initialize scheduled tasks on startup
+try:
+    from services.scheduler import initialize_scheduled_tasks
+    initialize_scheduled_tasks()
+    logging.info("Scheduled tasks initialized")
+except Exception as e:
+    logging.warning(f"Failed to initialize scheduled tasks: {e}")
 
 if __name__ == "__main__":
     import uvicorn

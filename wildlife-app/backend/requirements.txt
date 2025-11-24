@@ -36,5 +36,8 @@ pytest>=7.4.0
 # Rate limiting
 slowapi>=0.1.9
 
+# Task scheduling
+APScheduler>=3.10.0
+
 # Optional: For better async database performance
 # asyncpg>=0.29.0  # Uncomment if you want to use asyncpg instead of psycopg2

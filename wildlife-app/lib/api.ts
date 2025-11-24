@@ -465,4 +465,44 @@ export async function exportDetections(options: ExportOptions = {}): Promise<Blo
     console.error('Error exporting detections:', error)
     throw new Error(error.response?.data?.detail || 'Failed to export detections')
   }
+}
+
+export async function deleteDetection(detectionId: number): Promise<void> {
+  try {
+    await axios.delete(`${API_URL}/detections/${detectionId}`, {
+      timeout: 10000
+    })
+  } catch (error: any) {
+    console.error('Error deleting detection:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to delete detection')
+  }
+}
+
+export async function bulkDeleteDetections(detectionIds: number[]): Promise<{ deleted_count: number }> {
+  try {
+    const response = await axios.post(
+      `${API_URL}/detections/bulk-delete`,
+      detectionIds,
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    )
+    return response.data
+  } catch (error: any) {
+    console.error('Error bulk deleting detections:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to delete detections')
+  }
+}
+
+export async function getScheduledJobs(): Promise<Array<{ id: string; name: string; next_run: string | null; trigger: string }>> {
+  try {
+    const response = await axios.get(`${API_URL}/api/scheduler/jobs`, {
+      timeout: 5000
+    })
+    return response.data.jobs || []
+  } catch (error: any) {
+    console.error('Error fetching scheduled jobs:', error)
+    return []
+  }
 } 

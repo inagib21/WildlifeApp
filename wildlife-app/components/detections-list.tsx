@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Detection } from "@/types/api"
-import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions } from "@/lib/api"
+import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions, deleteDetection, bulkDeleteDetections } from "@/lib/api"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -63,6 +63,8 @@ export function DetectionsList() {
   const [selectedDetection, setSelectedDetection] = React.useState<Detection | null>(null)
   const [searchQuery, setSearchQuery] = React.useState("")
   const [exporting, setExporting] = React.useState(false)
+  const [selectedDetections, setSelectedDetections] = React.useState<Set<number>>(new Set())
+  const [deleting, setDeleting] = React.useState(false)
 
   React.useEffect(() => {
     setLoading(true)
@@ -188,6 +190,81 @@ export function DetectionsList() {
     }
   }
 
+  const handleDelete = async (detectionId: number) => {
+    if (!confirm(`Are you sure you want to delete detection #${detectionId}?`)) {
+      return
+    }
+
+    try {
+      await deleteDetection(detectionId)
+      toast.success('Detection deleted successfully')
+      // Refresh the list
+      const offset = page * PAGE_SIZE
+      const data = await getDetections({
+        limit: PAGE_SIZE,
+        offset: offset,
+        search: searchQuery || undefined
+      })
+      setDetections(data)
+      const count = await getDetectionsCount()
+      setTotalCount(count)
+    } catch (error: any) {
+      console.error('Delete error:', error)
+      toast.error(error.message || 'Failed to delete detection')
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    if (selectedDetections.size === 0) {
+      toast.error('No detections selected')
+      return
+    }
+
+    if (!confirm(`Are you sure you want to delete ${selectedDetections.size} detection(s)?`)) {
+      return
+    }
+
+    try {
+      setDeleting(true)
+      const result = await bulkDeleteDetections(Array.from(selectedDetections))
+      toast.success(`Deleted ${result.deleted_count} detection(s) successfully`)
+      setSelectedDetections(new Set())
+      // Refresh the list
+      const offset = page * PAGE_SIZE
+      const data = await getDetections({
+        limit: PAGE_SIZE,
+        offset: offset,
+        search: searchQuery || undefined
+      })
+      setDetections(data)
+      const count = await getDetectionsCount()
+      setTotalCount(count)
+    } catch (error: any) {
+      console.error('Bulk delete error:', error)
+      toast.error(error.message || 'Failed to delete detections')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const toggleSelection = (detectionId: number) => {
+    const newSelection = new Set(selectedDetections)
+    if (newSelection.has(detectionId)) {
+      newSelection.delete(detectionId)
+    } else {
+      newSelection.add(detectionId)
+    }
+    setSelectedDetections(newSelection)
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedDetections.size === sortedDetections.length) {
+      setSelectedDetections(new Set())
+    } else {
+      setSelectedDetections(new Set(sortedDetections.map(d => d.id)))
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -211,6 +288,16 @@ export function DetectionsList() {
           />
         </div>
         <div className="flex gap-2">
+          {selectedDetections.size > 0 && (
+            <Button
+              onClick={handleBulkDelete}
+              disabled={deleting}
+              variant="destructive"
+              size="sm"
+            >
+              {deleting ? 'Deleting...' : `Delete ${selectedDetections.size} Selected`}
+            </Button>
+          )}
           <Button
             onClick={() => handleExport('csv')}
             disabled={exporting}
@@ -235,6 +322,14 @@ export function DetectionsList() {
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-12">
+                <input
+                  type="checkbox"
+                  checked={selectedDetections.size === sortedDetections.length && sortedDetections.length > 0}
+                  onChange={toggleSelectAll}
+                  className="cursor-pointer"
+                />
+              </TableHead>
               <TableHead>Photo</TableHead>
               <TableHead className="cursor-pointer" onClick={() => handleSort('timestamp')}>
                 Timestamp {sortBy === 'timestamp' ? (sortDir === 'asc' ? '▲' : '▼') : ''}
@@ -254,7 +349,7 @@ export function DetectionsList() {
           <TableBody>
             {sortedDetections.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="text-center">No detections found.</TableCell>
+                <TableCell colSpan={7} className="text-center">No detections found.</TableCell>
               </TableRow>
             ) : (
               sortedDetections.map((detection) => {
@@ -275,8 +370,17 @@ export function DetectionsList() {
                   validImageUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}${validImageUrl}`
                 }
                 const commonName = detection.species && detection.species.includes(';') ? detection.species.split(';').pop()?.trim() : detection.species
+                const isSelected = selectedDetections.has(detection.id)
                 return (
-                  <TableRow key={detection.id}>
+                  <TableRow key={detection.id} className={isSelected ? "bg-muted" : ""}>
+                    <TableCell>
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleSelection(detection.id)}
+                        className="cursor-pointer"
+                      />
+                    </TableCell>
                     <TableCell>
                       <div className="relative w-24 h-16 cursor-pointer" onClick={() => setSelectedDetection(detection)}>
                         <Image src={validImageUrl} alt={`Detection ${detection.id}`} fill className="object-cover rounded" />
@@ -296,9 +400,18 @@ export function DetectionsList() {
                     <TableCell><Badge>{Math.round(detection.confidence * 100)}%</Badge></TableCell>
                     <TableCell>{detection.camera_name || detection.camera_id}</TableCell>
                     <TableCell>
-                      <a href={validImageUrl} target="_blank" rel="noopener noreferrer">
-                        <Button size="sm" variant="outline">View</Button>
-                      </a>
+                      <div className="flex gap-2">
+                        <a href={validImageUrl} target="_blank" rel="noopener noreferrer">
+                          <Button size="sm" variant="outline">View</Button>
+                        </a>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => handleDelete(detection.id)}
+                        >
+                          Delete
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 )
