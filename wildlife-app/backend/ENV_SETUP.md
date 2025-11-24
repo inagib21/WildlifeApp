@@ -39,6 +39,13 @@ SMTP_USER=your_email@gmail.com
 SMTP_PASSWORD=your_app_password
 NOTIFICATION_EMAIL_FROM=your_email@gmail.com
 NOTIFICATION_EMAIL_TO=recipient1@example.com,recipient2@example.com
+
+# Scheduled Backups (optional - uses APScheduler)
+# Backups run automatically at:
+# - Daily: 2:00 AM (configurable via API)
+# - Weekly: Sunday 3:00 AM (configurable via API)
+# Backups are stored in: wildlife-app/backend/backups/
+# Old backups are automatically cleaned up (keeps 30 most recent)
 ```
 
 ## Security Notes

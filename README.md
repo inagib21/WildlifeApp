@@ -19,7 +19,16 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
 - MotionEye camera integration for live streams and image capture
 - Real-time system health and live updates
 - Chunked and paginated detection queries for large datasets
-- Advanced analytics: detections per hour/day, top species, unique species count
+- Advanced analytics dashboard with interactive charts (species, timeline, camera performance)
+- Automated database backups with scheduled tasks
+- Email notifications for high-confidence detections
+- Disk space monitoring and alerts
+- Data export (CSV/JSON) with filtering
+- Full-text search across detections
+- Bulk operations (delete multiple detections)
+- Image compression and thumbnail generation
+- Comprehensive audit logging system
+- Interactive API documentation (Swagger/ReDoc)
 
 ## Stack & Tools
 - **Backend:** Python 3.11+, FastAPI, SQLAlchemy, asyncpg, psutil, dotenv
