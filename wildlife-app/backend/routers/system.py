@@ -36,11 +36,59 @@ def setup_system_router(limiter: Limiter) -> APIRouter:
             # Use very short interval for cpu_percent (non-blocking requires previous call)
             cpu_percent = psutil.cpu_percent(interval=0.01)  # Very short interval for fast response
             memory_percent = psutil.virtual_memory().percent
+            
+            # Enhanced disk space monitoring
             try:
-                disk_percent = psutil.disk_usage('/').percent
-            except:
-                # Windows might use different path
-                disk_percent = psutil.disk_usage('C:\\').percent if os.name == 'nt' else 0
+                disk_path = 'C:\\' if os.name == 'nt' else '/'
+                disk = psutil.disk_usage(disk_path)
+                disk_percent = disk.percent
+                disk_total_gb = disk.total / (1024**3)  # Convert to GB
+                disk_used_gb = disk.used / (1024**3)
+                disk_free_gb = disk.free / (1024**3)
+                disk_alert = disk_percent >= 90  # Alert if >90% full
+            except Exception as e:
+                disk_percent = 0
+                disk_total_gb = 0
+                disk_used_gb = 0
+                disk_free_gb = 0
+                disk_alert = False
+            
+            # Check media directories disk usage
+            media_disk_info = {}
+            try:
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                motioneye_media_path = os.path.join(project_root, "motioneye_media")
+                archived_photos_path = os.path.join(project_root, "archived_photos")
+                
+                # Calculate directory sizes
+                def get_dir_size(path):
+                    if not os.path.exists(path):
+                        return 0
+                    total = 0
+                    try:
+                        for entry in os.scandir(path):
+                            if entry.is_file():
+                                total += entry.stat().st_size
+                            elif entry.is_dir():
+                                total += get_dir_size(entry.path)
+                    except (PermissionError, OSError):
+                        pass
+                    return total
+                
+                motioneye_size = get_dir_size(motioneye_media_path)
+                archived_size = get_dir_size(archived_photos_path)
+                
+                media_disk_info = {
+                    "motioneye_media_gb": round(motioneye_size / (1024**3), 2),
+                    "archived_photos_gb": round(archived_size / (1024**3), 2),
+                    "total_media_gb": round((motioneye_size + archived_size) / (1024**3), 2)
+                }
+            except Exception:
+                media_disk_info = {
+                    "motioneye_media_gb": 0,
+                    "archived_photos_gb": 0,
+                    "total_media_gb": 0
+                }
             
             # Prepare default statuses
             motioneye_status = "unknown"
@@ -117,6 +165,21 @@ def setup_system_router(limiter: Limiter) -> APIRouter:
                 motioneye_status = "error"
                 speciesnet_status = "error"
             
+            # Check disk space and send alert if needed (only once per hour to avoid spam)
+            if disk_alert:
+                cache_key = "disk_alert_sent"
+                last_alert = get_cached(cache_key, ttl=3600)  # Check if alert sent in last hour
+                if not last_alert:
+                    try:
+                        notification_service.send_system_alert(
+                            subject="Low Disk Space Warning",
+                            message=f"Disk usage is at {disk_percent:.1f}% ({disk_used_gb:.1f} GB used of {disk_total_gb:.1f} GB total). Free space: {disk_free_gb:.1f} GB",
+                            alert_type="warning"
+                        )
+                        set_cached(cache_key, True, ttl=3600)  # Remember we sent alert
+                    except Exception as e:
+                        logging.warning(f"Failed to send disk space alert: {e}")
+            
             # Compose response immediately
             result = {
                 "status": "running",
@@ -124,6 +187,11 @@ def setup_system_router(limiter: Limiter) -> APIRouter:
                     "cpu_percent": cpu_percent,
                     "memory_percent": memory_percent,
                     "disk_percent": disk_percent,
+                    "disk_total_gb": round(disk_total_gb, 2),
+                    "disk_used_gb": round(disk_used_gb, 2),
+                    "disk_free_gb": round(disk_free_gb, 2),
+                    "disk_alert": disk_alert,
+                    "media_disk_info": media_disk_info,
                     "timestamp": datetime.utcnow().isoformat()
                 },
                 "motioneye": {
@@ -146,6 +214,11 @@ def setup_system_router(limiter: Limiter) -> APIRouter:
                     "cpu_percent": 0,
                     "memory_percent": 0,
                     "disk_percent": 0,
+                    "disk_total_gb": 0,
+                    "disk_used_gb": 0,
+                    "disk_free_gb": 0,
+                    "disk_alert": False,
+                    "media_disk_info": {},
                     "timestamp": datetime.utcnow().isoformat()
                 },
                 "motioneye": {

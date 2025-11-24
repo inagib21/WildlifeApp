@@ -12,6 +12,15 @@ interface SystemHealth {
     cpu_percent: number
     memory_percent: number
     disk_percent: number
+    disk_total_gb?: number
+    disk_used_gb?: number
+    disk_free_gb?: number
+    disk_alert?: boolean
+    media_disk_info?: {
+      motioneye_media_gb: number
+      archived_photos_gb: number
+      total_media_gb: number
+    }
     timestamp: string
   }
   motioneye: {
@@ -54,6 +63,15 @@ export function SystemHealth() {
             cpu_percent: 0,
             memory_percent: 0,
             disk_percent: 0,
+            disk_total_gb: 0,
+            disk_used_gb: 0,
+            disk_free_gb: 0,
+            disk_alert: false,
+            media_disk_info: {
+              motioneye_media_gb: 0,
+              archived_photos_gb: 0,
+              total_media_gb: 0
+            },
             timestamp: new Date().toISOString()
           },
           motioneye: {
@@ -77,6 +95,15 @@ export function SystemHealth() {
             cpu_percent: 0,
             memory_percent: 0,
             disk_percent: 0,
+            disk_total_gb: 0,
+            disk_used_gb: 0,
+            disk_free_gb: 0,
+            disk_alert: false,
+            media_disk_info: {
+              motioneye_media_gb: 0,
+              archived_photos_gb: 0,
+              total_media_gb: 0
+            },
             timestamp: new Date().toISOString()
           },
           motioneye: {
@@ -218,8 +245,37 @@ export function SystemHealth() {
               </div>
               <div className="flex items-center justify-between">
                 <p className="font-medium">Disk Usage</p>
-                <p className="text-sm">{health?.system?.disk_percent?.toFixed(1) || 'N/A'}%</p>
+                <div className="flex items-center gap-2">
+                  <p className={`text-sm ${health?.system?.disk_alert ? 'text-red-600 font-bold' : ''}`}>
+                    {health?.system?.disk_percent?.toFixed(1) || 'N/A'}%
+                  </p>
+                  {health?.system?.disk_alert && (
+                    <AlertCircle className="w-4 h-4 text-red-600" />
+                  )}
+                </div>
               </div>
+              {health?.system?.disk_total_gb && (
+                <>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <p>Total: {health.system.disk_total_gb.toFixed(1)} GB</p>
+                    <p>Free: {health.system.disk_free_gb?.toFixed(1) || 'N/A'} GB</p>
+                  </div>
+                  {health?.system?.media_disk_info && health.system.media_disk_info.total_media_gb > 0 && (
+                    <div className="mt-2 pt-2 border-t text-xs">
+                      <p className="font-medium mb-1">Media Storage:</p>
+                      <p className="text-muted-foreground">
+                        MotionEye: {health.system.media_disk_info.motioneye_media_gb.toFixed(2)} GB
+                      </p>
+                      <p className="text-muted-foreground">
+                        Archived: {health.system.media_disk_info.archived_photos_gb.toFixed(2)} GB
+                      </p>
+                      <p className="text-muted-foreground font-medium">
+                        Total Media: {health.system.media_disk_info.total_media_gb.toFixed(2)} GB
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </CardContent>
         </Card>

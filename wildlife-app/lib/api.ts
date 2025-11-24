@@ -131,7 +131,8 @@ export async function getSystemHealth() {
     })
     const data = response.data
     return {
-      status: data.motioneye?.status || 'unknown',
+      ...data, // Return full response including new disk info
+      status: data.status || data.motioneye?.status || 'unknown',
       cameras: data.motioneye?.cameras_count || 0,
       detections: 0, // Will be updated when we add detection counting
       motioneye_status: data.motioneye?.status || 'unknown',
@@ -383,5 +384,50 @@ export async function getUniqueSpeciesCountFast(days: number = 30): Promise<numb
   } catch (error) {
     console.error('Error fetching unique species count (fast):', error)
     return 0
+  }
+}
+
+export interface ExportOptions {
+  format?: 'csv' | 'json'
+  cameraId?: number
+  species?: string
+  startDate?: string
+  endDate?: string
+  limit?: number
+}
+
+export async function exportDetections(options: ExportOptions = {}): Promise<Blob> {
+  try {
+    const params = new URLSearchParams()
+    
+    params.append('format', options.format || 'csv')
+    
+    if (options.cameraId) {
+      params.append('camera_id', options.cameraId.toString())
+    }
+    if (options.species) {
+      params.append('species', options.species)
+    }
+    if (options.startDate) {
+      params.append('start_date', options.startDate)
+    }
+    if (options.endDate) {
+      params.append('end_date', options.endDate)
+    }
+    if (options.limit) {
+      params.append('limit', options.limit.toString())
+    }
+    
+    const url = `${API_URL}/api/detections/export?${params.toString()}`
+    
+    const response = await axios.get(url, {
+      responseType: 'blob',
+      timeout: 120000 // 2 minute timeout for large exports
+    })
+    
+    return response.data
+  } catch (error: any) {
+    console.error('Error exporting detections:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to export detections')
   }
 } 

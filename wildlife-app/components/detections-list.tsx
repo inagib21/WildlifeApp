@@ -2,12 +2,15 @@
 
 import * as React from "react"
 import { Detection } from "@/types/api"
-import { getDetections, getDetectionsCount, getDetectionsChunked } from "@/lib/api"
+import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions } from "@/lib/api"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import Image from "next/image"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose } from "@/components/ui/dialog"
+import { toast } from "sonner"
+import { Download } from "lucide-react"
 
 // Utility function to generate media URL from image path
 function generateMediaUrl(imagePath: string): string {
@@ -58,19 +61,25 @@ export function DetectionsList() {
   const [sortBy, setSortBy] = React.useState<'timestamp' | 'confidence' | 'species' | 'camera'>('timestamp')
   const [sortDir, setSortDir] = React.useState<'asc' | 'desc'>('desc')
   const [selectedDetection, setSelectedDetection] = React.useState<Detection | null>(null)
+  const [searchQuery, setSearchQuery] = React.useState("")
+  const [exporting, setExporting] = React.useState(false)
 
   React.useEffect(() => {
     setLoading(true)
     const fetchPage = async () => {
       const offset = page * PAGE_SIZE
-      const data = await getDetectionsChunked(undefined, PAGE_SIZE + offset)
-      setDetections(data.slice(offset, offset + PAGE_SIZE))
+      const data = await getDetections({
+        limit: PAGE_SIZE,
+        offset: offset,
+        search: searchQuery || undefined
+      })
+      setDetections(data)
       const count = await getDetectionsCount()
       setTotalCount(count)
       setLoading(false)
     }
     fetchPage()
-  }, [page])
+  }, [page, searchQuery])
 
   // Subscribe to real-time detection updates via SSE
   React.useEffect(() => {
@@ -155,12 +164,71 @@ export function DetectionsList() {
     )
   }
 
+  const handleExport = async (format: 'csv' | 'json' = 'csv') => {
+    try {
+      setExporting(true)
+      const blob = await exportDetections({ format })
+      
+      // Create download link
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `detections_export_${new Date().toISOString().split('T')[0]}.${format}`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      window.URL.revokeObjectURL(url)
+      
+      toast.success(`Exported ${format.toUpperCase()} file successfully`)
+    } catch (error: any) {
+      console.error('Export error:', error)
+      toast.error(error.message || 'Failed to export detections')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Detections</h1>
-        <div className="text-sm text-muted-foreground">
-          {totalCount} total detections | Page {page + 1} of {pageCount}
+        <div className="flex items-center gap-2">
+          <div className="text-sm text-muted-foreground">
+            {totalCount} total detections | Page {page + 1} of {pageCount}
+          </div>
+        </div>
+      </div>
+      
+      {/* Search and Export Controls */}
+      <div className="flex items-center gap-4">
+        <div className="flex-1">
+          <Input
+            type="text"
+            placeholder="Search detections (species, camera, path)..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="max-w-md"
+          />
+        </div>
+        <div className="flex gap-2">
+          <Button
+            onClick={() => handleExport('csv')}
+            disabled={exporting}
+            variant="outline"
+            size="sm"
+          >
+            <Download className="w-4 h-4 mr-2" />
+            {exporting ? 'Exporting...' : 'Export CSV'}
+          </Button>
+          <Button
+            onClick={() => handleExport('json')}
+            disabled={exporting}
+            variant="outline"
+            size="sm"
+          >
+            <Download className="w-4 h-4 mr-2" />
+            {exporting ? 'Exporting...' : 'Export JSON'}
+          </Button>
         </div>
       </div>
       <div className="rounded-md border overflow-x-auto">

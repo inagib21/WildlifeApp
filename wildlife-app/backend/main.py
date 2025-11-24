@@ -41,6 +41,7 @@ try:
     from utils.audit import log_audit_event, get_audit_logs
     from services.motioneye import motioneye_client
     from services.speciesnet import speciesnet_processor
+    from services.notifications import notification_service
 except ImportError:
     # Fallback for direct execution
     from config import DATABASE_URL, MOTIONEYE_URL, SPECIESNET_URL, THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD, ALLOWED_ORIGINS
@@ -50,6 +51,7 @@ except ImportError:
     from utils.audit import log_audit_event, get_audit_logs
     from services.motioneye import motioneye_client
     from services.speciesnet import speciesnet_processor
+    from services.notifications import notification_service
 
 try:
     from .camera_sync import CameraSyncService, sync_motioneye_cameras
@@ -516,11 +518,59 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
         # Use very short interval for cpu_percent (non-blocking requires previous call)
         cpu_percent = psutil.cpu_percent(interval=0.01)  # Very short interval for fast response
         memory_percent = psutil.virtual_memory().percent
+        
+        # Enhanced disk space monitoring
         try:
-            disk_percent = psutil.disk_usage('/').percent
-        except:
-            # Windows might use different path
-            disk_percent = psutil.disk_usage('C:\\').percent if os.name == 'nt' else 0
+            disk_path = 'C:\\' if os.name == 'nt' else '/'
+            disk = psutil.disk_usage(disk_path)
+            disk_percent = disk.percent
+            disk_total_gb = disk.total / (1024**3)  # Convert to GB
+            disk_used_gb = disk.used / (1024**3)
+            disk_free_gb = disk.free / (1024**3)
+            disk_alert = disk_percent >= 90  # Alert if >90% full
+        except Exception as e:
+            disk_percent = 0
+            disk_total_gb = 0
+            disk_used_gb = 0
+            disk_free_gb = 0
+            disk_alert = False
+        
+        # Check media directories disk usage
+        media_disk_info = {}
+        try:
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            motioneye_media_path = os.path.join(project_root, "motioneye_media")
+            archived_photos_path = os.path.join(project_root, "archived_photos")
+            
+            # Calculate directory sizes
+            def get_dir_size(path):
+                if not os.path.exists(path):
+                    return 0
+                total = 0
+                try:
+                    for entry in os.scandir(path):
+                        if entry.is_file():
+                            total += entry.stat().st_size
+                        elif entry.is_dir():
+                            total += get_dir_size(entry.path)
+                except (PermissionError, OSError):
+                    pass
+                return total
+            
+            motioneye_size = get_dir_size(motioneye_media_path)
+            archived_size = get_dir_size(archived_photos_path)
+            
+            media_disk_info = {
+                "motioneye_media_gb": round(motioneye_size / (1024**3), 2),
+                "archived_photos_gb": round(archived_size / (1024**3), 2),
+                "total_media_gb": round((motioneye_size + archived_size) / (1024**3), 2)
+            }
+        except Exception:
+            media_disk_info = {
+                "motioneye_media_gb": 0,
+                "archived_photos_gb": 0,
+                "total_media_gb": 0
+            }
         
         # Prepare default statuses
         motioneye_status = "unknown"
@@ -597,15 +647,31 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
             motioneye_status = "error"
             speciesnet_status = "error"
         
-        # Compose response immediately
-        result = {
-            "status": "running",
-            "system": {
-                "cpu_percent": cpu_percent,
-                "memory_percent": memory_percent,
-                "disk_percent": disk_percent,
-                "timestamp": datetime.utcnow().isoformat()
-            },
+            # Check disk space and send alert if needed
+            if disk_alert:
+                try:
+                    notification_service.send_system_alert(
+                        subject="Low Disk Space Warning",
+                        message=f"Disk usage is at {disk_percent:.1f}% ({disk_used_gb:.1f} GB used of {disk_total_gb:.1f} GB total). Free space: {disk_free_gb:.1f} GB",
+                        alert_type="warning"
+                    )
+                except Exception as e:
+                    logging.warning(f"Failed to send disk space alert: {e}")
+            
+            # Compose response immediately
+            result = {
+                "status": "running",
+                "system": {
+                    "cpu_percent": cpu_percent,
+                    "memory_percent": memory_percent,
+                    "disk_percent": disk_percent,
+                    "disk_total_gb": round(disk_total_gb, 2),
+                    "disk_used_gb": round(disk_used_gb, 2),
+                    "disk_free_gb": round(disk_free_gb, 2),
+                    "disk_alert": disk_alert,
+                    "media_disk_info": media_disk_info,
+                    "timestamp": datetime.utcnow().isoformat()
+                },
             "motioneye": {
                 "status": motioneye_status,
                 "cameras_count": cameras_count
@@ -622,12 +688,17 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
         # Return error response instead of raising exception to avoid 500
         return {
             "status": "error",
-            "system": {
-                "cpu_percent": 0,
-                "memory_percent": 0,
-                "disk_percent": 0,
-                "timestamp": datetime.utcnow().isoformat()
-            },
+                "system": {
+                    "cpu_percent": 0,
+                    "memory_percent": 0,
+                    "disk_percent": 0,
+                    "disk_total_gb": 0,
+                    "disk_used_gb": 0,
+                    "disk_free_gb": 0,
+                    "disk_alert": False,
+                    "media_disk_info": {},
+                    "timestamp": datetime.utcnow().isoformat()
+                },
             "motioneye": {
                 "status": "error",
                 "cameras_count": 0
@@ -842,6 +913,10 @@ def get_detections(
     camera_id: Optional[int] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
+    species: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """Get detections with optional filtering and pagination"""
@@ -971,6 +1046,7 @@ async def process_image_with_speciesnet(
     request: Request,
     file: UploadFile = File(...),
     camera_id: Optional[int] = None,
+    compress: bool = True,
     db: Session = Depends(get_db)
 ):
     """Process an uploaded image with SpeciesNet"""
@@ -1016,6 +1092,26 @@ async def process_image_with_speciesnet(
             db.commit()
             db.refresh(db_detection)
             
+            # Compress image if enabled and file exists
+            if compress and db_detection.image_path and os.path.exists(db_detection.image_path):
+                try:
+                    from utils.image_compression import compress_image
+                    success, compressed_path, original_size = compress_image(
+                        db_detection.image_path,
+                        quality=85,
+                        max_width=1920,
+                        max_height=1080
+                    )
+                    if success and original_size:
+                        new_size = os.path.getsize(compressed_path)
+                        compression_ratio = (1 - new_size / original_size) * 100
+                        logging.info(
+                            f"Compressed detection image: {compression_ratio:.1f}% reduction "
+                            f"({original_size} -> {new_size} bytes)"
+                        )
+                except Exception as e:
+                    logging.warning(f"Image compression failed: {e}")
+            
             # Log successful processing
             log_audit_event(
                 db=db,
@@ -1029,6 +1125,19 @@ async def process_image_with_speciesnet(
                     "confidence": pred.get("prediction_score", 0.0)
                 }
             )
+            
+            # Send email notification if enabled and confidence is high enough
+            if pred.get("prediction_score", 0.0) >= 0.7:
+                try:
+                    notification_service.send_detection_notification(
+                        species=pred.get("prediction", "Unknown"),
+                        confidence=pred.get("prediction_score", 0.0),
+                        camera_id=camera_id or 1,
+                        detection_id=db_detection.id,
+                        timestamp=db_detection.timestamp
+                    )
+                except Exception as e:
+                    logging.warning(f"Failed to send notification: {e}")
             
             return {
                 "detection": db_detection,
@@ -1115,6 +1224,21 @@ async def capture_thingino_image(request: Request, camera_id: int, db: Session =
             db.commit()
             db.refresh(db_detection)
             
+            # Compress image if it exists
+            if db_detection.image_path and os.path.exists(db_detection.image_path):
+                try:
+                    from utils.image_compression import compress_image
+                    success, compressed_path, original_size = compress_image(
+                        db_detection.image_path,
+                        quality=85,
+                        max_width=1920,
+                        max_height=1080
+                    )
+                    if success:
+                        logging.info(f"Compressed captured image: {db_detection.image_path}")
+                except Exception as e:
+                    logging.warning(f"Image compression failed: {e}")
+            
             # Log successful capture
             log_audit_event(
                 db=db,
@@ -1129,6 +1253,21 @@ async def capture_thingino_image(request: Request, camera_id: int, db: Session =
                     "confidence": confidence
                 }
             )
+            
+            # Send email notification if enabled and confidence is high enough
+            if confidence >= 0.7:  # Only notify for high-confidence detections
+                try:
+                    notification_service.send_detection_notification(
+                        species=species,
+                        confidence=confidence,
+                        camera_id=camera_id,
+                        camera_name=camera.name,
+                        detection_id=db_detection.id,
+                        image_url=f"/api/thingino/image/{db_detection.id}",
+                        timestamp=db_detection.timestamp
+                    )
+                except Exception as e:
+                    logging.warning(f"Failed to send notification: {e}")
             
             # Broadcast the new detection to connected clients
             detection_event = {
@@ -1298,6 +1437,21 @@ async def thingino_webhook(request: Request, db: Session = Depends(get_db)):
                     "source": "thingino_webhook"
                 }
             )
+            
+            # Send email notification if enabled and confidence is high enough
+            if detection_data.get("confidence", 0) >= 0.7:
+                try:
+                    notification_service.send_detection_notification(
+                        species=detection_data["species"],
+                        confidence=detection_data["confidence"],
+                        camera_id=camera_id,
+                        camera_name=camera_name,
+                        detection_id=db_detection.id,
+                        image_url=f"/api/thingino/image/{db_detection.id}",
+                        timestamp=db_detection.timestamp
+                    )
+                except Exception as e:
+                    logging.warning(f"Failed to send notification: {e}")
             
             print(f"Detection saved: ID={db_detection.id}, Species={detection_data['species']}, Confidence={detection_data['confidence']}")
             
@@ -1706,6 +1860,21 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
                 "file_path": local_file_path
             }
         )
+        
+        # Send email notification if enabled and confidence is high enough
+        if detection_data.get("confidence", 0) >= 0.7:
+            try:
+                notification_service.send_detection_notification(
+                    species=detection_data["species"],
+                    confidence=detection_data["confidence"],
+                    camera_id=camera_id,
+                    camera_name=camera_name,
+                    detection_id=db_detection.id,
+                    image_url=f"/media/{extracted_camera_name}/{file_date}/{os.path.basename(local_file_path)}",
+                    timestamp=db_detection.timestamp
+                )
+            except Exception as e:
+                logging.warning(f"Failed to send notification: {e}")
         
         logger.info(
             "Saved detection %s from camera %s (%s) species=%s confidence=%.2f",
@@ -2645,6 +2814,240 @@ def get_audit_logs_api(
 ):
     """API endpoint alias for audit logs"""
     return get_audit_logs_endpoint(request, limit, offset, action, resource_type, resource_id, success_only, db)
+
+
+@app.get("/api/detections/export")
+@limiter.limit("10/minute")  # Rate limit: 10 requests per minute (expensive operation)
+def export_detections(
+    request: Request,
+    format: str = "csv",  # csv or json
+    camera_id: Optional[int] = None,
+    species: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    """Export detections to CSV or JSON format"""
+    from fastapi.responses import Response
+    from sqlalchemy import or_
+    
+    # Build query with filters
+    query = db.query(Detection)
+    
+    if camera_id:
+        query = query.filter(Detection.camera_id == camera_id)
+    
+    if species:
+        query = query.filter(Detection.species.ilike(f"%{species}%"))
+    
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query = query.filter(Detection.timestamp >= start_dt)
+        except ValueError:
+            pass
+    
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            query = query.filter(Detection.timestamp <= end_dt)
+        except ValueError:
+            pass
+    
+    # Apply limit if specified (default to 10000 for exports)
+    if limit is None:
+        limit = 10000
+    query = query.order_by(Detection.timestamp.desc()).limit(limit)
+    
+    detections = query.all()
+    
+    if format.lower() == "csv":
+        # Generate CSV
+        import csv
+        import io
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write header
+        writer.writerow([
+            "ID", "Camera ID", "Timestamp", "Species", "Confidence", 
+            "Image Path", "File Size", "Image Width", "Image Height", 
+            "Prediction Score"
+        ])
+        
+        # Write data
+        for det in detections:
+            writer.writerow([
+                det.id,
+                det.camera_id,
+                det.timestamp.isoformat() if det.timestamp else "",
+                det.species or "",
+                det.confidence or 0.0,
+                det.image_path or "",
+                det.file_size or 0,
+                det.image_width or 0,
+                det.image_height or 0,
+                det.prediction_score or 0.0
+            ])
+        
+        csv_content = output.getvalue()
+        output.close()
+        
+        # Log export
+        log_audit_event(
+            db=db,
+            request=request,
+            action="EXPORT",
+            resource_type="detection",
+            details={
+                "format": "csv",
+                "count": len(detections),
+                "camera_id": camera_id,
+                "species": species
+            }
+        )
+        
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename=detections_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            }
+        )
+    else:
+        # Generate JSON
+        result = []
+        for det in detections:
+            result.append({
+                "id": det.id,
+                "camera_id": det.camera_id,
+                "timestamp": det.timestamp.isoformat() if det.timestamp else None,
+                "species": det.species,
+                "confidence": det.confidence,
+                "image_path": det.image_path,
+                "file_size": det.file_size,
+                "image_width": det.image_width,
+                "image_height": det.image_height,
+                "image_quality": det.image_quality,
+                "prediction_score": det.prediction_score,
+                "detections_json": json.loads(det.detections_json) if det.detections_json else None
+            })
+        
+        # Log export
+        log_audit_event(
+            db=db,
+            request=request,
+            action="EXPORT",
+            resource_type="detection",
+            details={
+                "format": "json",
+                "count": len(detections),
+                "camera_id": camera_id,
+                "species": species
+            }
+        )
+        
+        return Response(
+            content=json.dumps(result, indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename=detections_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            }
+        )
+
+
+@app.post("/api/backup/create")
+@limiter.limit("5/hour")  # Rate limit: 5 backups per hour
+def create_backup_endpoint(request: Request, db: Session = Depends(get_db)):
+    """Manually trigger a database backup"""
+    try:
+        from services.backup import backup_service
+        
+        backup_path = backup_service.create_backup()
+        
+        if backup_path:
+            # Log backup creation
+            log_audit_event(
+                db=db,
+                request=request,
+                action="BACKUP",
+                resource_type="database",
+                details={
+                    "backup_path": str(backup_path),
+                    "size_mb": round(backup_path.stat().st_size / (1024 * 1024), 2)
+                }
+            )
+            
+            return {
+                "success": True,
+                "backup_path": str(backup_path),
+                "size_mb": round(backup_path.stat().st_size / (1024 * 1024), 2),
+                "message": "Backup created successfully"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create backup")
+            
+    except Exception as e:
+        logging.error(f"Backup creation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
+
+
+@app.get("/api/backup/list")
+@limiter.limit("60/minute")
+def list_backups_endpoint(request: Request):
+    """List all available backups"""
+    try:
+        from services.backup import backup_service
+        
+        backups = backup_service.list_backups()
+        backup_info = []
+        
+        for backup in backups:
+            info = backup_service.get_backup_info(backup)
+            if info:
+                backup_info.append(info)
+        
+        return {
+            "backups": backup_info,
+            "count": len(backup_info)
+        }
+    except Exception as e:
+        logging.error(f"Failed to list backups: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list backups: {str(e)}")
+
+
+@app.post("/api/backup/cleanup")
+@limiter.limit("5/hour")
+def cleanup_backups_endpoint(request: Request, keep_count: int = 10, db: Session = Depends(get_db)):
+    """Clean up old backups, keeping only the most recent N"""
+    try:
+        from services.backup import backup_service
+        
+        deleted_count = backup_service.cleanup_old_backups(keep_count=keep_count)
+        
+        # Log cleanup
+        log_audit_event(
+            db=db,
+            request=request,
+            action="CLEANUP",
+            resource_type="backup",
+            details={
+                "deleted_count": deleted_count,
+                "keep_count": keep_count
+            }
+        )
+        
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "keep_count": keep_count,
+            "message": f"Cleaned up {deleted_count} old backup(s)"
+        }
+    except Exception as e:
+        logging.error(f"Backup cleanup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
 
 
 if __name__ == "__main__":

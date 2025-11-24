@@ -102,7 +102,7 @@ export function RealtimeDashboard() {
   // Fetch each KPI independently
   useEffect(() => {
     getCameras().then(setCameras).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
-    getDetections(undefined, 50).then(setDetections).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
+    getDetections({ limit: 50 }).then(setDetections).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
     getSystemHealth().then(setSystemHealth).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
     getDetectionsCount().then(setTotalDetectionsCount).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
     getUniqueSpeciesCountFast(30).then(setTotalUniqueSpecies).catch(e => setError(e instanceof Error ? e : new Error(String(e))))

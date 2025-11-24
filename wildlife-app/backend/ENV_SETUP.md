@@ -30,6 +30,15 @@ API_KEY=your_api_key_here
 
 # MotionEye Sync Interval (seconds)
 MOTIONEYE_SYNC_INTERVAL_SECONDS=60
+
+# Email Notifications (optional)
+NOTIFICATION_ENABLED=false
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASSWORD=your_app_password
+NOTIFICATION_EMAIL_FROM=your_email@gmail.com
+NOTIFICATION_EMAIL_TO=recipient1@example.com,recipient2@example.com
 ```
 
 ## Security Notes
