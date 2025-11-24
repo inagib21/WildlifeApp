@@ -861,4 +861,107 @@ export async function getAdvancedMonitoring(): Promise<AdvancedMonitoring> {
     console.error('Error fetching advanced monitoring:', error)
     throw new Error(error.response?.data?.detail || 'Failed to fetch advanced monitoring')
   }
+}
+
+export interface TaskInfo {
+  task_id: string
+  task_type: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  created_at: string
+  started_at?: string | null
+  completed_at?: string | null
+  progress: number
+  message?: string | null
+  result?: Record<string, any> | null
+  error?: string | null
+  metadata?: Record<string, any> | null
+}
+
+export async function processImageAsync(
+  file: File,
+  cameraId?: number,
+  compress: boolean = true
+): Promise<{ task_id: string; status: string; message: string }> {
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (cameraId) formData.append('camera_id', cameraId.toString())
+    formData.append('compress', compress.toString())
+    formData.append('async_mode', 'true')
+
+    const response = await axios.post(`${API_URL}/process-image`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error starting async image processing:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to start image processing')
+  }
+}
+
+export async function getTaskStatus(taskId: string): Promise<TaskInfo> {
+  try {
+    const response = await axios.get(`${API_URL}/api/tasks/${taskId}`, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching task status:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch task status')
+  }
+}
+
+export async function listTasks(
+  taskType?: string,
+  status?: string,
+  limit: number = 100,
+  offset: number = 0
+): Promise<{ tasks: TaskInfo[]; total: number; limit: number; offset: number }> {
+  try {
+    const params = new URLSearchParams()
+    if (taskType) params.append('task_type', taskType)
+    if (status) params.append('status', status)
+    params.append('limit', limit.toString())
+    params.append('offset', offset.toString())
+
+    const response = await axios.get(`${API_URL}/api/tasks?${params.toString()}`, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error listing tasks:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to list tasks')
+  }
+}
+
+export async function cancelTask(taskId: string): Promise<{ success: boolean; message: string }> {
+  try {
+    const response = await axios.post(`${API_URL}/api/tasks/${taskId}/cancel`, null, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error cancelling task:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to cancel task')
+  }
+}
+
+export async function getTaskStats(): Promise<{
+  total: number
+  by_status: Record<string, number>
+  by_type: Record<string, number>
+  running: number
+  completed: number
+  failed: number
+}> {
+  try {
+    const response = await axios.get(`${API_URL}/api/tasks/stats`, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching task stats:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch task stats')
+  }
 } 

@@ -1149,10 +1149,40 @@ async def process_image_with_speciesnet(
     file: UploadFile = File(...),
     camera_id: Optional[int] = None,
     compress: bool = True,
+    async_mode: bool = False,
     db: Session = Depends(get_db)
 ):
-    """Process an uploaded image with SpeciesNet"""
+    """
+    Process an uploaded image with SpeciesNet
+    
+    Args:
+        async_mode: If True, returns task ID immediately and processes in background
+    """
     try:
+        from services.task_tracker import task_tracker, TaskStatus
+        
+        # If async mode, create task and return immediately
+        if async_mode:
+            task_id = task_tracker.create_task(
+                task_type="image_processing",
+                metadata={
+                    "camera_id": camera_id,
+                    "compress": compress,
+                    "filename": file.filename
+                }
+            )
+            
+            # Start background processing (simplified - in production, use proper background task queue)
+            import asyncio
+            asyncio.create_task(_process_image_background(task_id, file, camera_id, compress, db, request))
+            
+            return {
+                "task_id": task_id,
+                "status": "pending",
+                "message": "Image processing started in background"
+            }
+        
+        # Synchronous processing (existing behavior)
         # Save uploaded file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
             content = await file.read()
