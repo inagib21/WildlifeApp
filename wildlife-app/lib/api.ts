@@ -505,4 +505,108 @@ export async function getScheduledJobs(): Promise<Array<{ id: string; name: stri
     console.error('Error fetching scheduled jobs:', error)
     return []
   }
+}
+
+export interface SpeciesAnalytics {
+  species: Array<{
+    species: string
+    count: number
+    average_confidence: number
+    detections: Array<{
+      id: number
+      timestamp: string
+      confidence: number
+      camera_id: number
+    }>
+  }>
+  total_detections: number
+  unique_species: number
+}
+
+export interface TimelineAnalytics {
+  timeline: Array<{
+    date: string
+    count: number
+    species: Record<string, number>
+  }>
+  interval: string
+  total_points: number
+}
+
+export interface CameraAnalytics {
+  cameras: Array<{
+    camera_id: number
+    camera_name: string
+    count: number
+    average_confidence: number
+    top_species: Array<{
+      species: string
+      count: number
+    }>
+  }>
+  total_detections: number
+  total_cameras: number
+}
+
+export async function getSpeciesAnalytics(
+  startDate?: string,
+  endDate?: string,
+  cameraId?: number
+): Promise<SpeciesAnalytics> {
+  try {
+    const params = new URLSearchParams()
+    if (startDate) params.append('start_date', startDate)
+    if (endDate) params.append('end_date', endDate)
+    if (cameraId) params.append('camera_id', cameraId.toString())
+    
+    const response = await axios.get(`${API_URL}/api/analytics/species?${params.toString()}`, {
+      timeout: 10000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching species analytics:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch species analytics')
+  }
+}
+
+export async function getTimelineAnalytics(
+  startDate?: string,
+  endDate?: string,
+  cameraId?: number,
+  interval: 'day' | 'week' | 'month' = 'day'
+): Promise<TimelineAnalytics> {
+  try {
+    const params = new URLSearchParams()
+    if (startDate) params.append('start_date', startDate)
+    if (endDate) params.append('end_date', endDate)
+    if (cameraId) params.append('camera_id', cameraId.toString())
+    params.append('interval', interval)
+    
+    const response = await axios.get(`${API_URL}/api/analytics/timeline?${params.toString()}`, {
+      timeout: 10000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching timeline analytics:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch timeline analytics')
+  }
+}
+
+export async function getCameraAnalytics(
+  startDate?: string,
+  endDate?: string
+): Promise<CameraAnalytics> {
+  try {
+    const params = new URLSearchParams()
+    if (startDate) params.append('start_date', startDate)
+    if (endDate) params.append('end_date', endDate)
+    
+    const response = await axios.get(`${API_URL}/api/analytics/cameras?${params.toString()}`, {
+      timeout: 10000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching camera analytics:', error)
+    throw new Error(error.response?.data?.detail || 'Failed to fetch camera analytics')
+  }
 } 

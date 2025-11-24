@@ -74,7 +74,14 @@ logging.basicConfig(
 
 configure_access_logs()
 
-app = FastAPI()
+app = FastAPI(
+    title="Wildlife Detection API",
+    description="API for managing wildlife camera detections, cameras, and system monitoring",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
 
 # Rate limiting middleware - protect against API abuse
 from slowapi import Limiter, _rate_limit_exceeded_handler
