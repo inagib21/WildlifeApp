@@ -1217,9 +1217,11 @@ def get_detections(
 ):
     """Get detections with optional filtering and pagination"""
     try:
-        # First, let's verify the database connection and get a simple count
-        total_count = db.query(Detection).count()
-        logging.info(f"Total detections in database: {total_count}")
+        # Skip the expensive count query - it's not needed for the response
+        # Only log if in debug mode to avoid performance impact
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            total_count = db.query(Detection).count()
+            logging.debug(f"Total detections in database: {total_count}")
         
         query = db.query(Detection)
         

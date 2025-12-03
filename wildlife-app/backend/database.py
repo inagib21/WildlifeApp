@@ -14,6 +14,10 @@ engine = create_engine(
     max_overflow=20,        # Additional connections when pool is exhausted
     pool_pre_ping=True,     # Verify connections before using
     pool_recycle=3600,      # Recycle connections after 1 hour
+    connect_args={
+        "connect_timeout": 5,  # 5 second timeout for initial connection
+        "options": "-c statement_timeout=30000"  # 30 second timeout for queries (increased for large datasets)
+    },
     echo=False
 )
 
@@ -112,7 +116,7 @@ class ApiKey(Base):
     usage_count = Column(Integer, default=0)  # Track usage
     rate_limit_per_minute = Column(Integer, default=60)  # Per-key rate limiting
     allowed_ips = Column(Text, nullable=True)  # Comma-separated list of allowed IPs (optional)
-    metadata = Column(Text, nullable=True)  # JSON string for additional metadata
+    extra_metadata = Column(Text, nullable=True)  # JSON string for additional metadata (renamed from 'metadata' to avoid SQLAlchemy conflict)
 
 
 class User(Base):
@@ -151,6 +155,30 @@ class Session(Base):
     ip_address = Column(String, nullable=True)
     user_agent = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
+
+
+class Webhook(Base):
+    __tablename__ = "webhooks"
+    __table_args__ = (
+        Index('idx_webhook_active', 'is_active'),
+        Index('idx_webhook_event_type', 'event_type'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)  # Human-readable name
+    url = Column(String, nullable=False)  # Webhook URL
+    event_type = Column(String, nullable=False)  # detection, system_alert, etc.
+    is_active = Column(Boolean, default=True, index=True)
+    secret = Column(String, nullable=True)  # Optional secret for signing payloads
+    headers = Column(Text, nullable=True)  # JSON string for custom headers
+    retry_count = Column(Integer, default=3)  # Number of retry attempts
+    retry_delay = Column(Integer, default=5)  # Delay between retries in seconds
+    timeout = Column(Integer, default=10)  # Request timeout in seconds
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_triggered_at = Column(DateTime, nullable=True)
+    success_count = Column(Integer, default=0)
+    failure_count = Column(Integer, default=0)
+    description = Column(Text, nullable=True)  # Optional description
+    filters = Column(Text, nullable=True)  # JSON string for event filters (e.g., min_confidence, species)
 
 
 # Add error handling for database connection
