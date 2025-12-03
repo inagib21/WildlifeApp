@@ -1,0 +1,141 @@
+@startuml Wildlife Detection System Architecture
+
+!define RECTANGLE class
+
+title Wildlife Detection System - Architecture Diagram
+
+package "Frontend Layer" {
+  [Next.js Frontend] as Frontend
+  [React Components] as Components
+  [API Client] as APIClient
+  [Real-time Hooks] as RealtimeHooks
+}
+
+package "Backend API Layer" {
+  [FastAPI Server] as Backend
+  [API Endpoints] as Endpoints
+  [Rate Limiting] as RateLimit
+  [CORS Middleware] as CORS
+  [Authentication] as Auth
+}
+
+package "Business Logic Layer" {
+  [MotionEye Service] as MotionEyeService
+  [SpeciesNet Service] as SpeciesNetService
+  [Backup Service] as BackupService
+  [Notification Service] as NotificationService
+  [Scheduler Service] as SchedulerService
+  [Webhook Service] as WebhookService
+  [Auth Service] as AuthService
+  [Audit Service] as AuditService
+}
+
+package "Data Layer" {
+  database "PostgreSQL\n(pg_mooncake)" as Database {
+    [Detections Table] as DetectionsDB
+    [Cameras Table] as CamerasDB
+    [Audit Logs Table] as AuditDB
+    [Users Table] as UsersDB
+    [Webhooks Table] as WebhooksDB
+  }
+}
+
+package "External Services" {
+  [MotionEye\n(Docker)] as MotionEye
+  [SpeciesNet Server\n(Port 8000)] as SpeciesNet
+  [ESP32 Cameras] as Cameras
+  [Email/SMS] as Notifications
+}
+
+package "Scheduled Tasks" {
+  [Monthly Backup] as MonthlyBackup
+  [Audit Log Cleanup] as AuditCleanup
+  [Backup Cleanup] as BackupCleanup
+  [Camera Sync] as CameraSync
+  [Health Checks] as HealthChecks
+  [Report Generation] as Reports
+}
+
+' Frontend connections
+Frontend --> Components
+Frontend --> APIClient
+Frontend --> RealtimeHooks
+APIClient --> Backend
+RealtimeHooks --> Backend
+
+' Backend connections
+Backend --> Endpoints
+Backend --> RateLimit
+Backend --> CORS
+Backend --> Auth
+Endpoints --> MotionEyeService
+Endpoints --> SpeciesNetService
+Endpoints --> BackupService
+Endpoints --> NotificationService
+Endpoints --> WebhookService
+Endpoints --> AuthService
+Endpoints --> AuditService
+Endpoints --> Database
+
+' Service connections
+MotionEyeService --> MotionEye
+SpeciesNetService --> SpeciesNet
+BackupService --> Database
+NotificationService --> Notifications
+WebhookService --> Notifications
+AuthService --> Database
+AuditService --> Database
+
+' Database connections
+DetectionsDB --> Database
+CamerasDB --> Database
+AuditDB --> Database
+UsersDB --> Database
+WebhooksDB --> Database
+
+' Scheduler connections
+SchedulerService --> MonthlyBackup
+SchedulerService --> AuditCleanup
+SchedulerService --> BackupCleanup
+SchedulerService --> CameraSync
+SchedulerService --> HealthChecks
+SchedulerService --> Reports
+MonthlyBackup --> BackupService
+AuditCleanup --> Database
+BackupCleanup --> BackupService
+CameraSync --> MotionEyeService
+HealthChecks --> MotionEye
+HealthChecks --> SpeciesNet
+Reports --> Database
+
+' External service connections
+MotionEye --> Cameras
+MotionEye --> Backend : Webhooks
+SpeciesNet --> Backend : API Calls
+
+' Data flow annotations
+note right of Cameras
+  ESP32-CAM modules
+  capture images
+end note
+
+note right of MotionEye
+  Receives images from cameras
+  Sends webhooks to backend
+  on motion detection
+end note
+
+note right of SpeciesNet
+  AI classification service
+  Returns species predictions
+  with confidence scores
+end note
+
+note right of Database
+  Stores all detections,
+  camera configs, audit logs,
+  users, and webhooks
+end note
+
+@enduml
+

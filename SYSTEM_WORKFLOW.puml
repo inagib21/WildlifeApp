@@ -1,0 +1,142 @@
+@startuml Wildlife Detection System Workflow
+
+title Wildlife Detection System - Workflow Diagram
+
+actor User
+participant "Next.js Frontend" as Frontend
+participant "FastAPI Backend" as Backend
+participant "MotionEye" as MotionEye
+participant "SpeciesNet" as SpeciesNet
+participant "PostgreSQL" as Database
+participant "Scheduler" as Scheduler
+participant "Notification\nService" as Notifications
+
+== Image Capture & Detection Flow ==
+
+User -> Frontend: Access Dashboard
+Frontend -> Backend: GET /api/detections
+Backend -> Database: Query detections
+Database --> Backend: Return detections
+Backend --> Frontend: JSON response
+Frontend --> User: Display detections
+
+== Motion Detection & Processing Flow ==
+
+MotionEye -> MotionEye: Camera captures image
+MotionEye -> Backend: POST /webhook/motioneye\n(motion detected)
+activate Backend
+
+Backend -> Backend: Parse webhook payload
+Backend -> MotionEye: GET image file
+MotionEye --> Backend: Image data
+
+Backend -> SpeciesNet: POST /process-image\n(image file)
+activate SpeciesNet
+SpeciesNet -> SpeciesNet: AI classification
+SpeciesNet --> Backend: Species prediction\n(confidence score)
+deactivate SpeciesNet
+
+alt High confidence detection
+  Backend -> Database: INSERT detection record
+  Backend -> Notifications: Send email/SMS alert
+  Notifications --> User: Notification sent
+end
+
+Backend -> Database: Store detection metadata
+Database --> Backend: Confirmation
+Backend --> MotionEye: 200 OK
+deactivate Backend
+
+== Real-time Updates Flow ==
+
+Frontend -> Backend: SSE Connection\nGET /api/realtime
+activate Backend
+Backend -> Frontend: Stream updates
+loop Every 5 seconds
+  Backend -> Database: Query latest detections
+  Database --> Backend: New detections
+  Backend --> Frontend: Push update
+  Frontend --> User: Update UI
+end
+deactivate Backend
+
+== Scheduled Tasks Flow ==
+
+Scheduler -> Scheduler: Monthly Backup\n(1st of month, 2 AM)
+Scheduler -> Backend: Trigger backup
+Backend -> Database: pg_dump
+Database --> Backend: Backup file
+Backend -> Backend: Save to backups/
+Backend -> Backend: Cleanup old backups
+
+Scheduler -> Scheduler: Audit Log Cleanup\n(1st of month, 3:30 AM)
+Scheduler -> Backend: Trigger cleanup
+Backend -> Database: DELETE logs > 90 days
+Database --> Backend: Cleanup complete
+
+Scheduler -> Scheduler: Camera Sync\n(Every 6 hours)
+Scheduler -> Backend: Trigger sync
+Backend -> MotionEye: GET /config/list
+MotionEye --> Backend: Camera list
+Backend -> Database: UPDATE cameras
+Database --> Backend: Sync complete
+
+Scheduler -> Scheduler: Health Checks\n(Every hour)
+Scheduler -> Backend: Check services
+Backend -> MotionEye: GET /status
+Backend -> SpeciesNet: GET /health
+Backend -> Database: Check connectivity
+Backend -> Backend: Log health status
+
+== User Operations Flow ==
+
+User -> Frontend: Search detections
+Frontend -> Backend: GET /api/detections?search=...
+Backend -> Database: Full-text search
+Database --> Backend: Filtered results
+Backend --> Frontend: Results
+Frontend --> User: Display results
+
+User -> Frontend: Delete detection
+Frontend -> Backend: DELETE /api/detections/{id}
+Backend -> Database: DELETE detection
+Backend -> Backend: Log audit event
+Database --> Backend: Confirmation
+Backend --> Frontend: Success
+Frontend --> User: Update UI
+
+User -> Frontend: View analytics
+Frontend -> Backend: GET /api/analytics/species
+Backend -> Database: Aggregate queries
+Database --> Backend: Analytics data
+Backend --> Frontend: Chart data
+Frontend --> User: Display charts
+
+== Backup & Restore Flow ==
+
+User -> Frontend: Manual backup
+Frontend -> Backend: POST /api/backup/create
+Backend -> Database: pg_dump
+Database --> Backend: Backup file
+Backend -> Backend: Save to backups/
+Backend --> Frontend: Backup path
+Frontend --> User: Confirmation
+
+User -> Frontend: List backups
+Frontend -> Backend: GET /api/backup/list
+Backend -> Backend: Scan backups/
+Backend --> Frontend: Backup list
+Frontend --> User: Display backups
+
+== Webhook Integration Flow ==
+
+External -> Backend: POST /webhook/custom
+activate Backend
+Backend -> Backend: Validate webhook
+Backend -> Database: Store webhook config
+Backend -> Backend: Process webhook
+Backend -> Notifications: Forward to endpoints
+deactivate Backend
+
+@enduml
+
