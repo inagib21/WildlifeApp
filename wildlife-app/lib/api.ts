@@ -1,9 +1,19 @@
 import { Camera, Detection } from '@/types/api'
 import axios from 'axios'
+import { apiCache } from './api-cache'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
 
-export const getCameras = async () => {
+export const getCameras = async (useCache: boolean = true) => {
+  // Check cache first (5 second TTL for fast page navigation)
+  const cacheKey = 'cameras'
+  if (useCache) {
+    const cached = apiCache.get<Camera[]>(cacheKey)
+    if (cached) {
+      return cached
+    }
+  }
+
   try {
     const response = await axios.get(`${API_URL}/cameras`, {
       timeout: 60000, // 60 second timeout
@@ -11,6 +21,10 @@ export const getCameras = async () => {
         'Content-Type': 'application/json'
       }
     })
+    // Cache the response for 5 seconds
+    if (useCache) {
+      apiCache.set(cacheKey, response.data, 5000)
+    }
     return response.data
   } catch (error: any) {
     console.error('Error fetching cameras:', error)
@@ -60,7 +74,18 @@ export interface DetectionFilters {
   search?: string
 }
 
-export async function getDetections(filters?: DetectionFilters): Promise<Detection[]> {
+export async function getDetections(filters?: DetectionFilters, useCache: boolean = false): Promise<Detection[]> {
+  // Only cache if no filters (or minimal filters) to avoid cache bloat
+  const shouldCache = useCache && (!filters || (!filters.search && !filters.startDate && !filters.endDate))
+  const cacheKey = `detections:${JSON.stringify(filters || {})}`
+  
+  if (shouldCache) {
+    const cached = apiCache.get<Detection[]>(cacheKey)
+    if (cached) {
+      return cached
+    }
+  }
+
   try {
     const params = new URLSearchParams()
     
@@ -100,9 +125,30 @@ export async function getDetections(filters?: DetectionFilters): Promise<Detecti
     const response = await axios.get(url, {
       timeout: 60000 // 60 second timeout for large responses
     })
+    
+    // Cache for 3 seconds (detections change frequently)
+    if (shouldCache) {
+      apiCache.set(cacheKey, response.data, 3000)
+    }
+    
     return response.data
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error fetching detections:', error)
+    
+    // Provide helpful error messages
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      console.error('Request timed out. The backend may be slow or unresponsive.')
+    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_NETWORK')) {
+      console.error('❌ Cannot connect to backend server!')
+      console.error(`   Backend URL: ${API_URL}/detections`)
+      console.error('   Please ensure the backend is running on port 8001')
+      console.error('   Start it with: npm run backend:venv or use scripts\\start-system.bat')
+    } else if (error.response) {
+      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+    } else {
+      console.error('Unknown error:', error.message || error)
+    }
+    
     return []
   }
 }
@@ -159,13 +205,22 @@ export async function createDetection(detection: Omit<Detection, 'id'>): Promise
   return response.data
 }
 
-export async function getSystemHealth() {
+export async function getSystemHealth(useCache: boolean = true) {
+  // Check cache first (3 second TTL for fast page navigation)
+  const cacheKey = 'system_health'
+  if (useCache) {
+    const cached = apiCache.get<any>(cacheKey)
+    if (cached) {
+      return cached
+    }
+  }
+
   try {
     const response = await axios.get(`${API_URL}/system`, {
       timeout: 3000 // 3 second timeout (backend optimized to respond quickly)
     })
     const data = response.data
-    return {
+    const result = {
       ...data, // Return full response including new disk info
       status: data.status || data.motioneye?.status || 'unknown',
       cameras: data.motioneye?.cameras_count || 0,
@@ -174,6 +229,11 @@ export async function getSystemHealth() {
       speciesnet_status: data.speciesnet?.status || 'unknown',
       system: data.system
     }
+    // Cache for 3 seconds
+    if (useCache) {
+      apiCache.set(cacheKey, result, 3000)
+    }
+    return result
   } catch (error: any) {
     // Handle timeout gracefully - don't retry, just return default values
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
@@ -224,7 +284,7 @@ export async function getCameraStream(cameraId: number) {
 export async function syncCamerasFromMotionEye() {
   try {
     const response = await axios.post(`${API_URL}/cameras/sync`, {}, {
-      timeout: 30000, // 30 second timeout
+      timeout: 60000, // 60 second timeout (increased for MotionEye sync)
       headers: {
         'Content-Type': 'application/json'
       }
@@ -234,7 +294,15 @@ export async function syncCamerasFromMotionEye() {
     console.error('Error syncing cameras from MotionEye:', error)
     // Provide more helpful error messages
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-      throw new Error('Request timed out. Please check if the backend server is running.')
+      throw new Error('Request timed out. The sync operation may be taking longer than expected, or MotionEye may not be responding. Please check if MotionEye is running at http://localhost:8765')
+    } else if (error.response?.status === 503) {
+      // Service unavailable - MotionEye not accessible
+      throw new Error(error.response.data?.detail || 'MotionEye is not accessible. Please ensure MotionEye is running.')
+    } else if (error.response?.status === 500) {
+      // Server error
+      throw new Error(error.response.data?.detail || 'Error syncing cameras from MotionEye')
+    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
+      throw new Error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
     }
     if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_CONNECTION_REFUSED')) {
       throw new Error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
@@ -371,8 +439,20 @@ export async function getSpeciesCounts(range: 'week' | 'month' | 'all' = 'all'):
       timeout: 60000 // 60 second timeout
     })
     return response.data
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error fetching species counts:', error)
+    
+    // Provide helpful error messages
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      console.error('Request timed out. The backend may be slow or unresponsive.')
+    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_NETWORK')) {
+      console.error('❌ Cannot connect to backend server!')
+      console.error(`   Backend URL: ${API_URL}/detections/species-counts`)
+      console.error('   Please ensure the backend is running on port 8001')
+    } else if (error.response) {
+      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+    }
+    
     return []
   }
 }
@@ -423,7 +503,7 @@ export async function getUniqueSpeciesCountFast(days: number = 30): Promise<numb
 }
 
 export interface ExportOptions {
-  format?: 'csv' | 'json'
+  format?: 'csv' | 'json' | 'pdf'
   cameraId?: number
   species?: string
   startDate?: string

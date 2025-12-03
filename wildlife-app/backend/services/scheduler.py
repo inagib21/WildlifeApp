@@ -4,9 +4,9 @@ import logging
 from datetime import datetime, time
 from typing import Optional, Callable
 import threading
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.schedulers.background import BackgroundScheduler  # pyright: ignore[reportMissingImports]
+from apscheduler.triggers.cron import CronTrigger  # pyright: ignore[reportMissingImports]
+from apscheduler.triggers.interval import IntervalTrigger  # pyright: ignore[reportMissingImports]
 from datetime import timedelta
 
 try:
@@ -87,6 +87,40 @@ class TaskScheduler:
             replace_existing=True
         )
         logger.info(f"Scheduled weekly backup on day {day_of_week} at {hour:02d}:{minute:02d}")
+    
+    def schedule_monthly_backup(self, day: int = 1, hour: int = 2, minute: int = 0):
+        """
+        Schedule monthly database backups
+        
+        Args:
+            day: Day of month (1-31) to run backup
+            hour: Hour of day (0-23) to run backup
+            minute: Minute of hour (0-59) to run backup
+        """
+        def backup_job():
+            try:
+                logger.info(f"Starting scheduled monthly backup at {datetime.now()}")
+                backup_path = backup_service.create_backup()
+                if backup_path:
+                    logger.info(f"Scheduled monthly backup completed: {backup_path}")
+                    # Clean up old backups (keep last 30)
+                    deleted = backup_service.cleanup_old_backups(keep_count=30)
+                    if deleted > 0:
+                        logger.info(f"Cleaned up {deleted} old backup(s)")
+                else:
+                    logger.error("Scheduled monthly backup failed")
+            except Exception as e:
+                logger.error(f"Scheduled monthly backup error: {e}", exc_info=True)
+        
+        # Schedule monthly on specified day
+        self.scheduler.add_job(
+            backup_job,
+            trigger=CronTrigger(day=day, hour=hour, minute=minute),
+            id='monthly_backup',
+            name='Monthly Database Backup',
+            replace_existing=True
+        )
+        logger.info(f"Scheduled monthly backup on day {day} at {hour:02d}:{minute:02d}")
     
     def schedule_cleanup(self, interval_hours: int = 24):
         """
@@ -187,12 +221,13 @@ def get_scheduler() -> TaskScheduler:
     return task_scheduler
 
 
-def schedule_audit_log_cleanup(retention_days: int = 90, hour: int = 3, minute: int = 0):
+def schedule_audit_log_cleanup(retention_days: int = 90, day: int = 1, hour: int = 3, minute: int = 0):
     """
-    Schedule automatic cleanup of old audit logs
+    Schedule automatic cleanup of old audit logs (monthly)
     
     Args:
         retention_days: Number of days to keep logs
+        day: Day of month (1-31) to run cleanup
         hour: Hour of day to run cleanup
         minute: Minute of hour to run cleanup
     """
@@ -219,29 +254,31 @@ def schedule_audit_log_cleanup(retention_days: int = 90, hour: int = 3, minute: 
     scheduler = get_scheduler()
     scheduler.scheduler.add_job(
         cleanup_job,
-        trigger=CronTrigger(hour=hour, minute=minute),
+        trigger=CronTrigger(day=day, hour=hour, minute=minute),
         id='audit_log_cleanup',
         name='Audit Log Cleanup',
         replace_existing=True
     )
-    logger.info(f"Scheduled audit log cleanup daily at {hour:02d}:{minute:02d} (retention: {retention_days} days)")
+    logger.info(f"Scheduled audit log cleanup monthly on day {day} at {hour:02d}:{minute:02d} (retention: {retention_days} days)")
 
 
 def initialize_scheduled_tasks():
     """Initialize default scheduled tasks"""
     scheduler = get_scheduler()
     
-    # Schedule daily backup at 2 AM
-    scheduler.schedule_daily_backup(hour=2, minute=0)
-    
-    # Schedule weekly backup on Sunday at 3 AM
-    scheduler.schedule_weekly_backup(day_of_week=6, hour=3, minute=0)
+    # Schedule monthly backup (configurable via environment variables)
+    try:
+        from config import BACKUP_SCHEDULE_MONTHLY_DAY, BACKUP_SCHEDULE_MONTHLY_HOUR
+        schedule_monthly_backup(day=BACKUP_SCHEDULE_MONTHLY_DAY, hour=BACKUP_SCHEDULE_MONTHLY_HOUR, minute=0)
+    except ImportError:
+        # Default to 1st of month at 2 AM if config not available
+        schedule_monthly_backup(day=1, hour=2, minute=0)
     
     # Schedule backup cleanup every 24 hours
     scheduler.schedule_cleanup(interval_hours=24)
     
-    # Schedule audit log cleanup daily at 3:30 AM (90 day retention)
-    schedule_audit_log_cleanup(retention_days=90, hour=3, minute=30)
+    # Schedule audit log cleanup monthly on the 1st at 3:30 AM (90 day retention)
+    schedule_audit_log_cleanup(retention_days=90, day=1, hour=3, minute=30)
     
     # Schedule image archival daily at 4:00 AM (if enabled)
     try:
@@ -251,7 +288,29 @@ def initialize_scheduled_tasks():
     except ImportError:
         pass  # Archival not configured
     
+    # Schedule camera sync every 6 hours
+    schedule_camera_sync(interval_hours=6)
+    
+    # Schedule system health checks every hour
+    schedule_system_health_check(interval_hours=1)
+    
+    # Schedule weekly report generation on Monday at 8:00 AM
+    schedule_report_generation(day_of_week=0, hour=8, minute=0)
+    
     logger.info("Initialized default scheduled tasks")
+
+
+def schedule_monthly_backup(day: int = 1, hour: int = 2, minute: int = 0):
+    """
+    Schedule monthly database backups
+    
+    Args:
+        day: Day of month (1-31) to run backup
+        hour: Hour of day (0-23) to run backup
+        minute: Minute of hour (0-59) to run backup
+    """
+    scheduler = get_scheduler()
+    scheduler.schedule_monthly_backup(day=day, hour=hour, minute=minute)
 
 
 def schedule_image_archival(hour: int = 4, minute: int = 0, limit: int = 100):
@@ -290,3 +349,153 @@ def schedule_image_archival(hour: int = 4, minute: int = 0, limit: int = 100):
     )
     logger.info(f"Scheduled image archival daily at {hour:02d}:{minute:02d} (limit: {limit})")
 
+
+def schedule_camera_sync(interval_hours: int = 6):
+    """
+    Schedule periodic camera synchronization with MotionEye
+    
+    Args:
+        interval_hours: Hours between sync runs
+    """
+    def sync_job():
+        try:
+            from camera_sync import sync_motioneye_cameras
+            from database import SessionLocal, Camera
+            from services.motioneye import MotionEyeClient
+            from config import MOTIONEYE_URL, MOTIONEYE_USERNAME, MOTIONEYE_PASSWORD
+            
+            logger.info(f"Starting scheduled camera sync at {datetime.now()}")
+            db = SessionLocal()
+            try:
+                motioneye_client = MotionEyeClient(
+                    base_url=MOTIONEYE_URL,
+                    username=MOTIONEYE_USERNAME,
+                    password=MOTIONEYE_PASSWORD
+                )
+                sync_motioneye_cameras(db, motioneye_client, Camera)
+                logger.info("Scheduled camera sync completed")
+            except Exception as e:
+                logger.error(f"Scheduled camera sync error: {e}", exc_info=True)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to run scheduled camera sync: {e}", exc_info=True)
+    
+    scheduler = get_scheduler()
+    scheduler.scheduler.add_job(
+        sync_job,
+        trigger=IntervalTrigger(hours=interval_hours),
+        id='camera_sync',
+        name='Camera Sync',
+        replace_existing=True
+    )
+    logger.info(f"Scheduled camera sync every {interval_hours} hours")
+
+
+def schedule_system_health_check(interval_hours: int = 1):
+    """
+    Schedule periodic system health checks
+    
+    Args:
+        interval_hours: Hours between health checks
+    """
+    def health_check_job():
+        try:
+            import psutil
+            import os
+            from database import SessionLocal
+            from services.notifications import notification_service
+            
+            logger.info(f"Starting scheduled system health check at {datetime.now()}")
+            
+            # Check disk space (use current directory root on Windows)
+            try:
+                root_path = 'C:\\' if os.name == 'nt' else '/'
+                disk = psutil.disk_usage(root_path)
+            except Exception:
+                # Fallback to current directory
+                disk = psutil.disk_usage('.')
+            disk_percent = (disk.used / disk.total) * 100
+            
+            if disk_percent > 90:
+                notification_service.send_system_alert(
+                    subject="High Disk Usage",
+                    message=f"Disk usage is at {disk_percent:.1f}%. Consider cleaning up old files.",
+                    alert_type="warning"
+                )
+            
+            # Check memory
+            memory = psutil.virtual_memory()
+            if memory.percent > 90:
+                notification_service.send_system_alert(
+                    subject="High Memory Usage",
+                    message=f"Memory usage is at {memory.percent:.1f}%.",
+                    alert_type="warning"
+                )
+            
+            logger.info("Scheduled system health check completed")
+        except Exception as e:
+            logger.error(f"Scheduled system health check error: {e}", exc_info=True)
+    
+    scheduler = get_scheduler()
+    scheduler.scheduler.add_job(
+        health_check_job,
+        trigger=IntervalTrigger(hours=interval_hours),
+        id='system_health_check',
+        name='System Health Check',
+        replace_existing=True
+    )
+    logger.info(f"Scheduled system health check every {interval_hours} hours")
+
+
+def schedule_report_generation(day_of_week: int = 0, hour: int = 8, minute: int = 0):
+    """
+    Schedule weekly report generation
+    
+    Args:
+        day_of_week: Day of week (0=Monday, 6=Sunday)
+        hour: Hour of day (0-23)
+        minute: Minute of hour (0-59)
+    """
+    def report_job():
+        try:
+            from database import SessionLocal, Detection
+            from datetime import datetime, timedelta
+            import os
+            
+            logger.info(f"Starting scheduled report generation at {datetime.now()}")
+            db = SessionLocal()
+            try:
+                # Generate weekly summary
+                week_ago = datetime.now() - timedelta(days=7)
+                detections = db.query(Detection).filter(Detection.timestamp >= week_ago).all()
+                
+                # Create reports directory if it doesn't exist
+                reports_dir = "./reports"
+                os.makedirs(reports_dir, exist_ok=True)
+                
+                # Generate summary (could be extended to create PDF/CSV)
+                summary = {
+                    "period": f"{week_ago.date()} to {datetime.now().date()}",
+                    "total_detections": len(detections),
+                    "unique_species": len(set(d.species for d in detections if d.species)),
+                    "generated_at": datetime.now().isoformat()
+                }
+                
+                logger.info(f"Scheduled report generation completed: {summary}")
+            except Exception as e:
+                logger.error(f"Scheduled report generation error: {e}", exc_info=True)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to run scheduled report generation: {e}", exc_info=True)
+    
+    scheduler = get_scheduler()
+    scheduler.scheduler.add_job(
+        report_job,
+        trigger=CronTrigger(day_of_week=day_of_week, hour=hour, minute=minute),
+        id='report_generation',
+        name='Weekly Report Generation',
+        replace_existing=True
+    )
+    logger.info(f"Scheduled weekly report generation on day {day_of_week} at {hour:02d}:{minute:02d}")

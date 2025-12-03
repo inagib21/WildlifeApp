@@ -1,51 +1,45 @@
-# Wildlife App Startup Scripts
+# Wildlife App Control Script
 
-This folder contains the Windows batch scripts for managing the Wildlife App services.
+This folder contains a single control script for managing all Wildlife App services.
 
 ## 🚀 Quick Start
 
-**Recommended:** Double-click `wildlife-app-control.bat` for an interactive menu-driven control center.
+**Double-click:** `control.bat`
 
-## Available Scripts
+This opens a menu where you can:
+- Start all services
+- Stop all services
+- Check service health/status
 
-- **`wildlife-app-control.bat`** ⭐ **MAIN SCRIPT**
-  - Interactive menu with Start/Stop/Status options
-  - Handles all services automatically
-  - Best for daily use
+## Available Options
 
-- **`stop-wildlife-app.bat`**
-  - Quick one-click shutdown for all services
-  - Use if you need to stop services quickly without opening the control center
+- **`control.bat`** ⭐ **MAIN SCRIPT**
+  - Interactive menu with Start/Stop/Health Check options
+  - Starts all services: SpeciesNet, Backend, Frontend, Docker
+  - Stops all services cleanly
+  - Health check verifies all services are running and responding
 
 ## Usage
 
-All scripts are designed to be run from this `scripts/` folder. They automatically navigate to the correct project directories.
-
-### From Command Line
-
-```batch
-cd scripts
-wildlife-app-control.bat
-```
-
-### From File Explorer
-
-Simply double-click any `.bat` file in this folder.
+Simply double-click `control.bat` and choose an option from the menu.
 
 ## What the Scripts Do
 
-### Startup Scripts
-1. Check Docker status and start if needed
-2. Start Docker services (PostgreSQL & MotionEye)
-3. Verify backend files exist (main.py, config.py, database.py)
-4. Launch Backend server (FastAPI on port 8001)
-5. Launch Frontend server (Next.js on port 3000)
-6. Perform health checks to verify services started correctly
+### What `start.bat` Does:
+1. ✅ Checks Docker is running
+2. ✅ Starts Docker services (PostgreSQL & MotionEye)
+3. ✅ Verifies Python virtual environment exists
+4. ✅ Starts SpeciesNet server (port 8000)
+5. ✅ Starts Backend server (port 8001)
+6. ✅ Starts Frontend server (port 3000)
+7. ✅ Checks service status and shows URLs
 
-### Stop Scripts
-1. Stop Docker containers
-2. Kill Backend processes (Python)
-3. Kill Frontend processes (Node.js)
+### What `stop.bat` Does:
+1. ✅ Stops Docker containers
+2. ✅ Stops SpeciesNet server (port 8000)
+3. ✅ Stops Backend server (port 8001)
+4. ✅ Stops Frontend server (port 3000)
+5. ✅ Cleans up all processes and ports
 
 ## Service URLs
 
@@ -53,6 +47,7 @@ After starting services, access:
 - **Frontend:** http://localhost:3000
 - **Backend API:** http://localhost:8001
 - **Backend Docs:** http://localhost:8001/docs
+- **SpeciesNet Server:** http://localhost:8000
 - **MotionEye:** http://localhost:8765
 
 ## Troubleshooting
@@ -63,7 +58,7 @@ After starting services, access:
 
 ### Windows won't run scripts
 - Right-click script → Properties → Unblock (if blocked)
-- Or run from Command Prompt: `cd scripts && wildlife-app-control.bat`
+- Or run from Command Prompt: `cd scripts && start.bat` or `cd scripts && stop.bat`
 
 ### Services won't start
 - Check that Docker Desktop is installed and running

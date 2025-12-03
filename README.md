@@ -29,6 +29,15 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
 - Image compression and thumbnail generation
 - Comprehensive audit logging system
 - Interactive API documentation (Swagger/ReDoc)
+- Robust API validation with error handling (prevents crashes from invalid data)
+- Webhook support for external integrations
+- **Advanced keyboard shortcuts** with double-key sequences for safe, intentional navigation (see [`wildlife-app/KEYBOARD_SHORTCUTS.md`](wildlife-app/KEYBOARD_SHORTCUTS.md))
+- **Automated database backups** with scheduled monthly backups and retention policies (see [`wildlife-app/STORAGE_MANAGEMENT.md`](wildlife-app/STORAGE_MANAGEMENT.md))
+- **Disk space monitoring** with alerts when storage exceeds 90% capacity
+  - Double-key navigation: `DD` (Detections), `CC` (Cameras), `AA` (Analytics), `GG` (Dashboard)
+  - Search: `Ctrl+K` to focus search anywhere
+  - General: `Ctrl+R` (Refresh), `B` (Back), `F` (Forward)
+  - Help: `Shift+?` for quick help, `Ctrl+Shift+?` for full documentation
 
 ## Stack & Tools
 - **Backend:** Python 3.11+, FastAPI, SQLAlchemy, asyncpg, psutil, dotenv
@@ -44,16 +53,18 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
 
 **For Windows users**, we've created convenient startup scripts in the `scripts/` folder:
 
-1. **Navigate to the `scripts/` folder** and **double-click `wildlife-app-control.bat`** - This opens a menu-driven control center
+1. **Navigate to the `scripts/` folder** and **double-click `control.bat`** - This opens a menu-driven control center
 2. Select option **`[1] Start All Services`** - This will:
    - Check and start Docker (if needed)
    - Start Docker services (PostgreSQL & MotionEye)
+   - Launch SpeciesNet server (port 8000)
    - Launch Backend server (port 8001)
    - Launch Frontend server (port 3000)
 3. When done, select option **`[2] Stop All Services`** to cleanly shut everything down
 
-**Additional script:**
-- `scripts/stop-wildlife-app.bat` - Quick one-click shutdown (if you need to stop without opening control center)
+**Additional scripts:**
+- `scripts/start-backend-only.bat` - Quick script to start only the backend server (useful for debugging)
+- `scripts/QUICK_START.md` - Quick reference guide for starting services
 
 See `scripts/README.md` for detailed information about all available scripts.
 
@@ -90,28 +101,43 @@ docker-compose up -d
 ### 6. Configure the cameras on MotionEye
 - MotionEye: http://localhost:8765
 
-### 7. Run the frontend & backend together (Next.js) & (FastAPI)
+### 7. Run the services
+
+**Option A: Run all services together (Recommended)**
 ```sh
 cd wildlife-app
 npm run dev:all
 ```
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:8001/docs
-- MotionEye: http://localhost:8765
+This starts:
+- SpeciesNet server (port 8000)
+- Backend server (port 8001)
+- Frontend server (port 3000)
 
-### 8. OPTIONAL: Run services separately
+**Option B: Run services separately**
 
-**Backend only:**
+**SpeciesNet server:**
+```sh
+cd wildlife-app/backend
+python -m uvicorn speciesnet_server:app --host 0.0.0.0 --port 8000 --workers 4
+```
+
+**Backend server:**
 ```sh
 cd wildlife-app/backend
 python -m uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-**Frontend only:**
+**Frontend server:**
 ```sh
 cd wildlife-app
 npm run dev
 ```
+
+**Service URLs:**
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:8001/docs
+- SpeciesNet: http://localhost:8000
+- MotionEye: http://localhost:8765
 
 ## Development
 - **Backend code:** `wildlife-app/backend/`
@@ -120,17 +146,25 @@ npm run dev
 - **API types:** `wildlife-app/types/`
 - **Startup Scripts:** `scripts/` (Windows batch scripts for easy service management)
 
+## Recent Improvements
+- **Enhanced API Validation:** Improved validation for `/detections` and `/cameras` endpoints to handle edge cases gracefully
+- **Better Error Handling:** Invalid data is now skipped with detailed logging instead of crashing the endpoint
+- **Improved Scripts:** Updated control scripts with better health checks and status reporting
+
 ## Startup Scripts (Windows)
 
 All startup and shutdown scripts are organized in the `scripts/` folder:
 
-- **`scripts/wildlife-app-control.bat`** ⭐ **MAIN SCRIPT** - Interactive control center with menu (Start/Stop/Status)
-- **`scripts/stop-wildlife-app.bat`** - Quick one-click shutdown (optional)
+- **`scripts/control.bat`** ⭐ **MAIN SCRIPT** - Interactive control center with menu (Start/Stop/Status/Restart)
+- **`scripts/start-backend-only.bat`** - Quick script to start only the backend server (useful for debugging)
 
 The control center automatically:
 - Checks for Docker and starts it if needed
 - Starts Docker services (PostgreSQL & MotionEye)
-- Launches Backend and Frontend in separate windows
+- Launches SpeciesNet server (port 8000)
+- Launches Backend server (port 8001)
+- Launches Frontend server (port 3000)
+- Runs health checks to verify services are running
 - Provides clear status messages
 
 See `scripts/README.md` for detailed documentation.
@@ -168,13 +202,14 @@ The system includes comprehensive audit logging to track all system changes and 
 - **Frontend UI**: Navigate to "Audit Logs" in the sidebar or visit `http://localhost:3000/audit-logs`
 - **API**: `GET http://localhost:8001/api/audit-logs` with optional filters
 
+**Automatic Cleanup**: Audit logs are automatically cleaned up monthly (1st of each month at 3:30 AM) with a 90-day retention policy.
+
 See `wildlife-app/backend/AUDIT_LOGS_GUIDE.md` for detailed documentation.
 
 ## Future Improvements
 
 See `FUTURE_IMPROVEMENTS.md` for a comprehensive list of recommended enhancements including:
 - Email/SMS notifications for detections
-- Automated database backups
 - Disk space management
 - Data export and reporting
 - And many more...

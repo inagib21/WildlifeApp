@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Detection } from "@/types/api"
-import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions, deleteDetection, bulkDeleteDetections } from "@/lib/api"
+import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions, deleteDetection, bulkDeleteDetections, DetectionFilters } from "@/lib/api"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -66,20 +66,68 @@ export function DetectionsList() {
   const [exporting, setExporting] = React.useState(false)
   const [selectedDetections, setSelectedDetections] = React.useState<Set<number>>(new Set())
   const [deleting, setDeleting] = React.useState(false)
+  const [backendConnected, setBackendConnected] = React.useState<boolean | null>(null)
+
+  // Check backend connection status
+  React.useEffect(() => {
+    const checkBackend = async () => {
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
+        const response = await fetch(`${API_URL}/health`, { 
+          method: 'GET',
+          signal: AbortSignal.timeout(3000) // 3 second timeout
+        })
+        setBackendConnected(response.ok)
+      } catch (error) {
+        setBackendConnected(false)
+      }
+    }
+    
+    checkBackend()
+    // Check every 10 seconds
+    const interval = setInterval(checkBackend, 10000)
+    return () => clearInterval(interval)
+  }, [])
 
   React.useEffect(() => {
     setLoading(true)
     const fetchPage = async () => {
-      const offset = page * PAGE_SIZE
-      const data = await getDetections({
-        limit: PAGE_SIZE,
-        offset: offset,
-        search: searchQuery || undefined
-      })
-      setDetections(data)
-      const count = await getDetectionsCount()
-      setTotalCount(count)
-      setLoading(false)
+      try {
+        const offset = page * PAGE_SIZE
+        // Use cache only for first page without search (faster navigation)
+        const useCache = page === 0 && !searchQuery
+        const filters: DetectionFilters = {
+          limit: PAGE_SIZE,
+          offset: offset,
+          search: searchQuery || undefined
+        }
+        const data = await getDetections(filters, useCache)
+        setDetections(data)
+        setBackendConnected(true) // Success means backend is connected
+        // Fetch count in parallel (don't block on it)
+        getDetectionsCount().then(count => setTotalCount(count)).catch(() => {})
+      } catch (error: any) {
+        console.error('Failed to fetch detections:', error)
+        // Show user-friendly error message
+        if (error.message?.includes('Network Error') || error.code === 'ECONNREFUSED' || error.message?.includes('ERR_NETWORK')) {
+          setBackendConnected(false)
+          if (page === 0) { // Only show toast on first page load
+            toast.error('Cannot connect to backend server. Please ensure the backend is running on port 8001.', {
+              duration: 10000,
+              action: {
+                label: 'Start Backend',
+                onClick: () => {
+                  window.open('http://localhost:8001/health', '_blank')
+                }
+              }
+            })
+          }
+        }
+        setDetections([])
+        setTotalCount(0)
+      } finally {
+        setLoading(false)
+      }
     }
     fetchPage()
   }, [page, searchQuery])
@@ -104,11 +152,11 @@ export function DetectionsList() {
             return [newDetection, ...prev].slice(0, PAGE_SIZE)
           })
         }
-      }
-      
-      // Update the total count
-      setTotalCount((prev) => prev + 1)
-      
+        }
+        
+        // Update the total count
+        setTotalCount((prev) => prev + 1)
+        
       // Show toast notification for high-confidence detections
       if (newDetection.confidence && newDetection.confidence >= 0.7) {
         toast.success(
@@ -117,7 +165,7 @@ export function DetectionsList() {
             description: `Camera: ${newDetection.camera_name || newDetection.camera_id}`
           }
         )
-      }
+    }
     }
   })
 
@@ -163,7 +211,7 @@ export function DetectionsList() {
     )
   }
 
-  const handleExport = async (format: 'csv' | 'json' = 'csv') => {
+  const handleExport = async (format: 'csv' | 'json' | 'pdf' = 'csv') => {
     try {
       setExporting(true)
       const blob = await exportDetections({ format })
@@ -197,11 +245,12 @@ export function DetectionsList() {
       toast.success('Detection deleted successfully')
       // Refresh the list
       const offset = page * PAGE_SIZE
-      const data = await getDetections({
+      const filters: DetectionFilters = {
         limit: PAGE_SIZE,
         offset: offset,
         search: searchQuery || undefined
-      })
+      }
+      const data = await getDetections(filters, false)
       setDetections(data)
       const count = await getDetectionsCount()
       setTotalCount(count)
@@ -228,11 +277,12 @@ export function DetectionsList() {
       setSelectedDetections(new Set())
       // Refresh the list
       const offset = page * PAGE_SIZE
-      const data = await getDetections({
+      const filters: DetectionFilters = {
         limit: PAGE_SIZE,
         offset: offset,
         search: searchQuery || undefined
-      })
+      }
+      const data = await getDetections(filters, false)
       setDetections(data)
       const count = await getDetectionsCount()
       setTotalCount(count)
@@ -285,13 +335,39 @@ export function DetectionsList() {
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Detections</h1>
         <div className="flex items-center gap-2">
-          <div className="text-sm text-muted-foreground">
-            {totalCount} total detections | Page {page + 1} of {pageCount}
+        <div className="text-sm text-muted-foreground">
+          {totalCount} total detections | Page {page + 1} of {pageCount}
           </div>
         </div>
       </div>
       
       {sseStatusIndicator}
+      
+      {/* Backend Connection Status Banner */}
+      {backendConnected === false && (
+        <div className="mb-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+          <div className="flex items-center gap-2">
+            <WifiOff className="w-5 h-5 text-red-600 dark:text-red-400" />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-red-800 dark:text-red-200">
+                Backend server is not running
+              </p>
+              <p className="text-xs text-red-600 dark:text-red-300 mt-1">
+                Cannot connect to http://localhost:8001. Please start the backend server.
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                toast.info('To start the backend, run: npm run backend:venv or use scripts\\start-system.bat')
+              }}
+            >
+              How to Start
+            </Button>
+          </div>
+        </div>
+      )}
       
       {/* Search and Export Controls */}
       <div className="flex items-center gap-4">
@@ -332,6 +408,15 @@ export function DetectionsList() {
           >
             <Download className="w-4 h-4 mr-2" />
             {exporting ? 'Exporting...' : 'Export JSON'}
+          </Button>
+          <Button
+            onClick={() => handleExport('pdf')}
+            disabled={exporting}
+            variant="outline"
+            size="sm"
+          >
+            <Download className="w-4 h-4 mr-2" />
+            {exporting ? 'Exporting...' : 'Export PDF'}
           </Button>
         </div>
       </div>
@@ -418,9 +503,9 @@ export function DetectionsList() {
                     <TableCell>{detection.camera_name || detection.camera_id}</TableCell>
                     <TableCell>
                       <div className="flex gap-2">
-                        <a href={validImageUrl} target="_blank" rel="noopener noreferrer">
-                          <Button size="sm" variant="outline">View</Button>
-                        </a>
+                      <a href={validImageUrl} target="_blank" rel="noopener noreferrer">
+                        <Button size="sm" variant="outline">View</Button>
+                      </a>
                         <Button
                           size="sm"
                           variant="destructive"

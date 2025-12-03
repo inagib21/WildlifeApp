@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Request, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, text, Index
+from sqlalchemy import func, text, Index, or_
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any, Any as AnyType
 from datetime import datetime, timedelta
@@ -10,6 +10,7 @@ import requests
 from dotenv import load_dotenv
 import subprocess
 import json
+import ast
 from fastapi.responses import StreamingResponse, FileResponse
 import configparser
 import shutil
@@ -35,8 +36,8 @@ from hashlib import sha256
 # Import from new modular structure
 try:
     from config import DATABASE_URL, MOTIONEYE_URL, SPECIESNET_URL, THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD, ALLOWED_ORIGINS
-    from database import engine, SessionLocal, Base, Camera, Detection
-    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings, AuditLogResponse
+    from database import engine, SessionLocal, Base, Camera, Detection, Webhook
+    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings, AuditLogResponse, WebhookCreate, WebhookResponse
     from utils.caching import get_cached, set_cached
     from utils.audit import log_audit_event, get_audit_logs
     from services.motioneye import motioneye_client
@@ -45,8 +46,8 @@ try:
 except ImportError:
     # Fallback for direct execution
     from config import DATABASE_URL, MOTIONEYE_URL, SPECIESNET_URL, THINGINO_CAMERA_USERNAME, THINGINO_CAMERA_PASSWORD, ALLOWED_ORIGINS
-    from database import engine, SessionLocal, Base, Camera, Detection
-    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings, AuditLogResponse
+    from database import engine, SessionLocal, Base, Camera, Detection, Webhook
+    from models import CameraBase, CameraCreate, CameraResponse, DetectionBase, DetectionCreate, DetectionResponse, MotionSettings, AuditLogResponse, WebhookCreate, WebhookResponse
     from utils.caching import get_cached, set_cached
     from utils.audit import log_audit_event, get_audit_logs
     from services.motioneye import motioneye_client
@@ -121,6 +122,15 @@ def get_api_key(
     return None
 
 
+# Dependency - defined early so it can be used in verify_api_key
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 def verify_api_key(
     request: Request,
     api_key: Optional[str] = Depends(get_api_key),
@@ -175,13 +185,18 @@ class EventManager:
         self.system_queue = asyncio.Queue()
         self._background_tasks_started = False
     
-    def start_background_tasks(self):
+    async def start_background_tasks(self):
         """Start background tasks for processing events - called during FastAPI startup"""
         if not self._background_tasks_started:
-            asyncio.create_task(self._process_detection_events())
-            asyncio.create_task(self._process_system_events())
-            asyncio.create_task(self._broadcast_system_health_periodic())
-            self._background_tasks_started = True
+            try:
+                # Create tasks in the current event loop (startup is async)
+                asyncio.create_task(self._process_detection_events())
+                asyncio.create_task(self._process_system_events())
+                asyncio.create_task(self._broadcast_system_health_periodic())
+                self._background_tasks_started = True
+                logging.info("EventManager background tasks started")
+            except Exception as e:
+                logging.error(f"Failed to start EventManager background tasks: {e}", exc_info=True)
     
     async def _process_detection_events(self):
         """Process detection events and broadcast to clients"""
@@ -219,7 +234,13 @@ class EventManager:
             # Get system metrics
             cpu_percent = psutil.cpu_percent(interval=0.1)
             memory = psutil.virtual_memory()
-            disk = psutil.disk_usage('/')
+            # Windows-compatible disk usage
+            try:
+                root_path = 'C:\\' if os.name == 'nt' else '/'
+                disk = psutil.disk_usage(root_path)
+            except Exception:
+                # Fallback to current directory
+                disk = psutil.disk_usage('.')
             
             # Get MotionEye status with timeout
             motioneye_status = "unknown"
@@ -227,12 +248,20 @@ class EventManager:
             try:
                 # Use asyncio to run the blocking call with a timeout
                 loop = asyncio.get_event_loop()
-                cameras = await asyncio.wait_for(
-                    loop.run_in_executor(None, motioneye_client.get_cameras),
-                    timeout=2.0  # Shorter timeout to prevent blocking
+                motioneye_status = await asyncio.wait_for(
+                    loop.run_in_executor(None, motioneye_client.get_status),
+                    timeout=30.0  # Increased from 3s to 30s to handle slow MotionEye responses
                 )
-                cameras_count = len(cameras)
-                motioneye_status = "running" if cameras_count > 0 else "no_cameras"
+                # Also get cameras count if MotionEye is running
+                if motioneye_status == "running":
+                    try:
+                        cameras = await asyncio.wait_for(
+                            loop.run_in_executor(None, motioneye_client.get_cameras),
+                            timeout=15.0  # Increased from 2s to 15s to handle slow MotionEye responses
+                        )
+                        cameras_count = len(cameras) if cameras else 0
+                    except Exception:
+                        cameras_count = 0
             except asyncio.TimeoutError:
                 motioneye_status = "timeout"
             except Exception:
@@ -244,7 +273,7 @@ class EventManager:
                 # Use asyncio to run the blocking call with a timeout
                 speciesnet_status = await asyncio.wait_for(
                     loop.run_in_executor(None, speciesnet_processor.get_status),
-                    timeout=2.0  # Very short timeout to prevent blocking
+                    timeout=40.0  # Increased from 5s to 40s to handle slow SpeciesNet responses
                 )
             except asyncio.TimeoutError:
                 speciesnet_status = "timeout"
@@ -339,33 +368,54 @@ camera_sync_service = CameraSyncService(
 )
 
 # Create tables with explicit error logging
+# NOTE: This will fail if database is not running - that's OK, tables will be created on startup
 try:
     Base.metadata.create_all(bind=engine)
     # Print the list of tables after creation (PostgreSQL version)
     with engine.connect() as conn:
         result = conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';"))
         tables = [row[0] for row in result]
-        print(f"Tables in database after create_all: {tables}")
+        logging.debug(f"Tables in database after create_all: {tables}")
 except Exception as e:
-    import traceback
-    print("Error during table creation:")
-    traceback.print_exc()
+    # Database not available at module import time - this is expected
+    # Tables will be created during startup event
+    pass
 
 @app.on_event("startup")
 async def startup_event():
     try:
-        # Start EventManager background tasks
-        event_manager.start_background_tasks()
-        camera_sync_service.start()
-        print("EventManager background tasks started")
+        logging.info("=" * 50)
+        logging.info("Wildlife Backend Starting...")
+        logging.info("=" * 50)
+        
+        # Start EventManager background tasks (async)
+        try:
+            await event_manager.start_background_tasks()
+            logging.info("[OK] EventManager background tasks started")
+        except Exception as e:
+            logging.warning(f"EventManager startup failed: {e}")
+            import traceback
+            logging.debug(traceback.format_exc())
+        
+        # Start camera sync service
+        try:
+            camera_sync_service.start()
+            logging.info("[OK] Camera sync service started")
+        except Exception as e:
+            logging.warning(f"Camera sync service failed to start: {e}")
+        
         # Test database connection and create tables
         try:
             with engine.connect() as conn:
                 pass
-            print("Database connection successful")
+            logging.info("[OK] Database connection successful")
+            
             # Create tables if they don't exist
-            Base.metadata.create_all(bind=engine)
-            print("Database tables created successfully")
+            try:
+                Base.metadata.create_all(bind=engine)
+                logging.info("[OK] Database tables created/verified")
+            except Exception as e:
+                logging.warning(f"Table creation failed: {e}")
             
             # Migration: add file_hash column if not present (after tables exist)
             try:
@@ -373,22 +423,42 @@ async def startup_event():
                 if not any(c['name'] == 'file_hash' for c in insp.get_columns('detections')):
                     with engine.connect() as conn:
                         conn.execute(text('ALTER TABLE detections ADD COLUMN file_hash VARCHAR'))
-                        print('Added file_hash column to detections table')
+                        conn.commit()
+                        logging.info('[OK] Added file_hash column to detections table')
             except Exception as migration_error:
-                print(f"Migration warning (non-critical): {migration_error}")
+                logging.warning(f"Migration warning (non-critical): {migration_error}")
                 
         except Exception as e:
-            print(f"Database connection failed: {e}")
-            print("Please ensure PostgreSQL is running and accessible")
+            logging.error(f"Database connection failed: {e}")
+            logging.error("  Please ensure PostgreSQL is running and accessible")
+            logging.error("  The backend will continue but database features may not work")
             # Continue startup - the app can still run without database initially
         
         # Enable background photo scanner task
-        asyncio.create_task(run_photo_scanner())
-        print("Photo scanner background task started")
-        print("Backend startup completed successfully!")
+        try:
+            asyncio.create_task(run_photo_scanner())
+            logging.info("[OK] Photo scanner background task started")
+        except Exception as e:
+            logging.warning(f"Photo scanner failed to start: {e}")
+        
+        logging.info("=" * 50)
+        logging.info("[OK] Backend startup completed!")
+        logging.info("=" * 50)
+        logging.info(f"Backend API available at: http://localhost:8001")
+        logging.info(f"API Documentation at: http://localhost:8001/docs")
+        logging.info("=" * 50)
     except Exception as e:
-        print(f"Error during startup: {e}")
-        # Don't raise - let the app continue running
+        logging.error("=" * 50)
+        logging.error("[ERROR] CRITICAL ERROR during startup!")
+        logging.error("=" * 50)
+        logging.error(f"Error: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        logging.error("=" * 50)
+        logging.error("Backend will attempt to continue, but some features may not work.")
+        logging.error("Check the error above and fix the issue, then restart the backend.")
+        logging.error("=" * 50)
+        # Don't raise - let the app continue running so we can see the error
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -514,29 +584,29 @@ async def sync_cameras_background_task():
         except Exception as e:
             print(f"MotionEye connection failed: {e}")
     except Exception as e:
-        print(f"Camera sync background task error: {e}")
+        logging.error(f"Camera sync background task error: {e}")
 
 # One-time scan runner for startup sync
 async def run_photo_scanner_once():
     try:
         # Wait for SpeciesNet server to be ready - but don't block startup
-        print("Waiting for SpeciesNet server to initialize...")
+        logging.debug("Waiting for SpeciesNet server to initialize...")
         max_wait_time = 30  # Wait up to 30 seconds
         wait_interval = 2   # Check every 2 seconds
         
         for i in range(max_wait_time // wait_interval):
             status = speciesnet_processor.get_status()
             if status == "running":
-                print("SpeciesNet server is ready!")
+                logging.info("[OK] SpeciesNet server is ready!")
                 break
             elif status == "timeout":
-                print(f"SpeciesNet server still initializing... ({i+1}/{max_wait_time//wait_interval})")
+                logging.debug(f"SpeciesNet server still initializing... ({i+1}/{max_wait_time//wait_interval})")
             else:
-                print(f"SpeciesNet server status: {status}")
+                logging.debug(f"SpeciesNet server status: {status}")
             
             await asyncio.sleep(wait_interval)
         else:
-            print("SpeciesNet server failed to initialize within timeout, skipping initial scan")
+            logging.warning("SpeciesNet server failed to initialize within timeout, skipping initial scan")
             return
         
         # Now run the photo scanner
@@ -545,42 +615,26 @@ async def run_photo_scanner_once():
         await scanner.scan_and_process()
         db.close()
     except Exception as e:
-        print(f"Photo scanner initial sync error: {e}")
+        logging.error(f"Photo scanner initial sync error: {e}")
 
 # Pydantic models are now imported from models.py
-
-# Dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # API endpoints
 @app.get("/")
 def read_root():
     return {"message": "Wildlife Monitoring API with SpeciesNet Integration"}
 
-@app.get("/health")
-def health_check():
-    """Simple health check that responds immediately"""
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
-
-@app.get("/api/health")
-def health_check_api():
-    """API health check endpoint"""
-    return health_check()
+# Health check endpoints are defined later in the file (async versions with timeouts)
 
 @app.get("/system")
 @limiter.limit("60/minute")  # Rate limit: 60 requests per minute (frequently polled)
 async def get_system_health(request: Request) -> Dict[str, Any]:
     """Get system health and status information - returns quickly even if some services are slow"""
-    # Check cache first (5 second TTL for system health)
-    cached = get_cached("system_health", ttl=5)
+    # Check cache first (10 second TTL for system health - increased for better performance)
+    cached = get_cached("system_health", ttl=10)
     if cached:
         return cached
-    
+
     import asyncio
     from datetime import datetime
     import psutil
@@ -648,15 +702,15 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
         cameras_count = 0
         speciesnet_status = "unknown"
         
-        # Run MotionEye and SpeciesNet checks concurrently with very short timeouts
+        # Run MotionEye and SpeciesNet checks concurrently with reasonable timeouts
         # Use asyncio.to_thread for better cancellation support (Python 3.9+)
         try:
-            # Create tasks with very short individual timeouts
+            # Create tasks with reasonable individual timeouts
             motioneye_task = asyncio.create_task(
                 asyncio.wait_for(
-                    asyncio.to_thread(motioneye_client.get_cameras) if hasattr(asyncio, 'to_thread')
-                    else asyncio.get_event_loop().run_in_executor(None, motioneye_client.get_cameras),
-                    timeout=0.8  # Very short timeout - don't block
+                    asyncio.to_thread(motioneye_client.get_status) if hasattr(asyncio, 'to_thread')
+                    else asyncio.get_event_loop().run_in_executor(None, motioneye_client.get_status),
+                    timeout=30.0  # Increased from 3s to 30s to handle slow MotionEye responses
                 )
             )
             
@@ -664,7 +718,7 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
                 asyncio.wait_for(
                     asyncio.to_thread(speciesnet_processor.get_status) if hasattr(asyncio, 'to_thread')
                     else asyncio.get_event_loop().run_in_executor(None, speciesnet_processor.get_status),
-                    timeout=0.8  # Very short timeout - don't block
+                    timeout=40.0  # Increased from 5s to 40s to handle slow SpeciesNet responses
                 )
             )
         except AttributeError:
@@ -672,22 +726,22 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
             loop = asyncio.get_event_loop()
             motioneye_task = asyncio.create_task(
                 asyncio.wait_for(
-                    loop.run_in_executor(None, motioneye_client.get_cameras),
-                    timeout=0.8
+                    loop.run_in_executor(None, motioneye_client.get_status),
+                    timeout=30.0  # Increased from 3s to 30s to handle slow MotionEye responses
                 )
             )
             speciesnet_task = asyncio.create_task(
                 asyncio.wait_for(
                     loop.run_in_executor(None, speciesnet_processor.get_status),
-                    timeout=0.8
+                    timeout=40.0  # Increased from 5s to 40s to handle slow SpeciesNet responses
                 )
             )
         
-        # Wait for both with a very short overall timeout
+        # Wait for both with reasonable overall timeout
         try:
             motioneye_result, speciesnet_result = await asyncio.wait_for(
                 asyncio.gather(motioneye_task, speciesnet_task, return_exceptions=True),
-                timeout=1.0  # Total timeout for both checks - very short
+                timeout=45.0  # Increased from 6s to 45s to handle slow service responses
             )
             
             # Process MotionEye result
@@ -696,8 +750,14 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
             elif isinstance(motioneye_result, asyncio.TimeoutError):
                 motioneye_status = "timeout"
             else:
-                cameras_count = len(motioneye_result) if motioneye_result else 0
-                motioneye_status = "running" if cameras_count > 0 else "no_cameras"
+                # motioneye_result is now a status string from get_status()
+                motioneye_status = motioneye_result if isinstance(motioneye_result, str) else "unknown"
+                # Also get cameras count for display
+                try:
+                    cameras = motioneye_client.get_cameras()
+                    cameras_count = len(cameras) if cameras else 0
+                except Exception:
+                    cameras_count = 0
             
             # Process SpeciesNet result
             if isinstance(speciesnet_result, Exception):
@@ -705,7 +765,7 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
             elif isinstance(speciesnet_result, asyncio.TimeoutError):
                 speciesnet_status = "timeout"
             else:
-                speciesnet_status = speciesnet_result
+                speciesnet_status = speciesnet_result if isinstance(speciesnet_result, str) else "unknown"
                 
         except asyncio.TimeoutError:
             # If overall timeout, cancel tasks and use defaults
@@ -728,21 +788,21 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
                     )
                 except Exception as e:
                     logging.warning(f"Failed to send disk space alert: {e}")
-            
-            # Compose response immediately
+        
+        # Compose response immediately
             result = {
-                "status": "running",
-                "system": {
-                    "cpu_percent": cpu_percent,
-                    "memory_percent": memory_percent,
-                    "disk_percent": disk_percent,
+            "status": "running",
+            "system": {
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory_percent,
+                "disk_percent": disk_percent,
                     "disk_total_gb": round(disk_total_gb, 2),
                     "disk_used_gb": round(disk_used_gb, 2),
                     "disk_free_gb": round(disk_free_gb, 2),
                     "disk_alert": disk_alert,
                     "media_disk_info": media_disk_info,
-                    "timestamp": datetime.utcnow().isoformat()
-                },
+                "timestamp": datetime.utcnow().isoformat()
+            },
             "motioneye": {
                 "status": motioneye_status,
                 "cameras_count": cameras_count
@@ -753,23 +813,23 @@ async def get_system_health(request: Request) -> Dict[str, Any]:
         }
         
         # Cache the result for 5 seconds
-        set_cached("system_health", result, ttl=5)
+        set_cached("system_health", result, ttl=10)
         return result
     except Exception as e:
         # Return error response instead of raising exception to avoid 500
         return {
             "status": "error",
-                "system": {
-                    "cpu_percent": 0,
-                    "memory_percent": 0,
-                    "disk_percent": 0,
+            "system": {
+                "cpu_percent": 0,
+                "memory_percent": 0,
+                "disk_percent": 0,
                     "disk_total_gb": 0,
                     "disk_used_gb": 0,
                     "disk_free_gb": 0,
                     "disk_alert": False,
                     "media_disk_info": {},
-                    "timestamp": datetime.utcnow().isoformat()
-                },
+                "timestamp": datetime.utcnow().isoformat()
+            },
             "motioneye": {
                 "status": "error",
                 "cameras_count": 0
@@ -791,13 +851,13 @@ async def get_system_health_api(request: Request) -> Dict[str, Any]:
 def get_cameras(request: Request, db: Session = Depends(get_db)):
     """Get list of all cameras"""
     try:
-        # Check cache first (30 second TTL for camera list)
-        cached = get_cached("cameras_list", ttl=30)
+        # Check cache first (60 second TTL for camera list - increased for better performance)
+        cached = get_cached("cameras_list", ttl=60)
         if cached:
             return cached
         
         cameras = db.query(Camera).all()
-        
+    
         # Optimize: Get all detection counts in a single query (avoid N+1 problem)
         camera_ids = [camera.id for camera in cameras]
         
@@ -832,47 +892,92 @@ def get_cameras(request: Request, db: Session = Depends(get_db)):
         # Convert to response models with defaults for None values
         result = []
         for camera in cameras:
-            # Get detection statistics from pre-fetched data
-            detection_count = detection_counts.get(camera.id, 0)
-            last_detection_time = last_detections.get(camera.id)
-            
-            # Determine status based on is_active
-            status = "active" if (camera.is_active if camera.is_active is not None else True) else "inactive"
-            
-            # Ensure all fields have proper defaults if None
-            camera_dict = {
-                "id": camera.id,
-                "name": camera.name,
-                "url": camera.url or "",
-                "is_active": camera.is_active if camera.is_active is not None else True,
-                "width": camera.width if camera.width is not None else 1280,
-                "height": camera.height if camera.height is not None else 720,
-                "framerate": camera.framerate if camera.framerate is not None else 30,
-                "stream_port": camera.stream_port if camera.stream_port is not None else 8081,
-                "stream_quality": camera.stream_quality if camera.stream_quality is not None else 100,
-                "stream_maxrate": camera.stream_maxrate if camera.stream_maxrate is not None else 30,
-                "stream_localhost": camera.stream_localhost if camera.stream_localhost is not None else False,
-                "detection_enabled": camera.detection_enabled if camera.detection_enabled is not None else True,
-                "detection_threshold": camera.detection_threshold if camera.detection_threshold is not None else 1500,
-                "detection_smart_mask_speed": camera.detection_smart_mask_speed if camera.detection_smart_mask_speed is not None else 10,
-                "movie_output": camera.movie_output if camera.movie_output is not None else True,
-                "movie_quality": camera.movie_quality if camera.movie_quality is not None else 100,
-                "movie_codec": (camera.movie_codec.split(':')[0] if camera.movie_codec and ':' in camera.movie_codec else (camera.movie_codec[:50] if camera.movie_codec and len(camera.movie_codec) > 50 else camera.movie_codec)) if camera.movie_codec is not None else "mkv",
-                "snapshot_interval": camera.snapshot_interval if camera.snapshot_interval is not None else 0,
-                "target_dir": camera.target_dir if camera.target_dir is not None else "./motioneye_media",
-                "created_at": camera.created_at,
-                "stream_url": motioneye_client.get_camera_stream_url(camera.id) if camera.id else None,
-                "mjpeg_url": motioneye_client.get_camera_mjpeg_url(camera.id) if camera.id else None,
-                # Add detection statistics
-                "detection_count": detection_count,
-                "last_detection": last_detection_time,
-                "status": status,
-                "location": None,  # Can be added later if you track camera locations
-            }
-            result.append(camera_dict)
+            try:
+                # Get detection statistics from pre-fetched data
+                detection_count = detection_counts.get(camera.id, 0)
+                last_detection_time = last_detections.get(camera.id)
+                
+                # Determine status based on is_active
+                status = "active" if (camera.is_active if camera.is_active is not None else True) else "inactive"
+                
+                # Ensure all fields have proper defaults if None and validate them
+                # CameraBase requires: name (non-empty), url (non-empty), and valid field ranges
+                camera_name = str(camera.name).strip() if camera.name and str(camera.name).strip() else "Unnamed Camera"
+                camera_url = str(camera.url).strip() if camera.url and str(camera.url).strip() else "rtsp://localhost"
+                
+                # Ensure all numeric fields are within valid ranges
+                width_val = max(320, min(7680, int(camera.width) if camera.width is not None else 1280))
+                height_val = max(240, min(4320, int(camera.height) if camera.height is not None else 720))
+                framerate_val = max(1, min(120, int(camera.framerate) if camera.framerate is not None else 30))
+                stream_port_val = max(1024, min(65535, int(camera.stream_port) if camera.stream_port is not None else 8081))
+                stream_quality_val = max(1, min(100, int(camera.stream_quality) if camera.stream_quality is not None else 100))
+                stream_maxrate_val = max(1, min(120, int(camera.stream_maxrate) if camera.stream_maxrate is not None else 30))
+                detection_threshold_val = max(0, min(100000, int(camera.detection_threshold) if camera.detection_threshold is not None else 1500))
+                detection_smart_mask_speed_val = max(0, min(100, int(camera.detection_smart_mask_speed) if camera.detection_smart_mask_speed is not None else 10))
+                movie_quality_val = max(1, min(100, int(camera.movie_quality) if camera.movie_quality is not None else 100))
+                snapshot_interval_val = max(0, min(3600, int(camera.snapshot_interval) if camera.snapshot_interval is not None else 0))
+                
+                # Process movie_codec - ensure it's valid
+                movie_codec_val = "mkv"
+                if camera.movie_codec:
+                    codec = str(camera.movie_codec).strip()
+                    if ':' in codec:
+                        codec = codec.split(':')[0]
+                    movie_codec_val = codec[:50] if len(codec) > 50 else codec
+                
+                # Process target_dir - ensure it's valid
+                target_dir_val = str(camera.target_dir).strip() if camera.target_dir and str(camera.target_dir).strip() else "./motioneye_media"
+                
+                camera_dict = {
+                    "id": camera.id,
+                    "name": camera_name,
+                    "url": camera_url,
+                    "is_active": camera.is_active if camera.is_active is not None else True,
+                    "width": width_val,
+                    "height": height_val,
+                    "framerate": framerate_val,
+                    "stream_port": stream_port_val,
+                    "stream_quality": stream_quality_val,
+                    "stream_maxrate": stream_maxrate_val,
+                    "stream_localhost": camera.stream_localhost if camera.stream_localhost is not None else False,
+                    "detection_enabled": camera.detection_enabled if camera.detection_enabled is not None else True,
+                    "detection_threshold": detection_threshold_val,
+                    "detection_smart_mask_speed": detection_smart_mask_speed_val,
+                    "movie_output": camera.movie_output if camera.movie_output is not None else True,
+                    "movie_quality": movie_quality_val,
+                    "movie_codec": movie_codec_val,
+                    "snapshot_interval": snapshot_interval_val,
+                    "target_dir": target_dir_val,
+                    "created_at": camera.created_at,
+                    "stream_url": motioneye_client.get_camera_stream_url(camera.id) if camera.id else None,
+                    "mjpeg_url": motioneye_client.get_camera_mjpeg_url(camera.id) if camera.id else None,
+                    # Add detection statistics
+                    "detection_count": detection_count,
+                    "last_detection": last_detection_time,
+                    "status": status,
+                    "location": None,  # Can be added later if you track camera locations
+                }
+                
+                # Validate the camera_dict by creating a CameraResponse object
+                # This ensures all validation rules are met
+                try:
+                    camera_response = CameraResponse(**camera_dict)
+                    result.append(camera_response)
+                except Exception as validation_error:
+                    logging.error(f"Validation error for camera {camera.id}: {validation_error}")
+                    logging.error(f"Camera data: name={camera_name}, url={camera_url}")
+                    # Skip invalid cameras instead of crashing
+                    continue
+            except Exception as e:
+                logging.error(f"Error processing camera {camera.id}: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
+                # Skip this camera and continue
+                continue
         
-        # Cache the result for 30 seconds
-        set_cached("cameras_list", result, ttl=30)
+        # Cache the result for 60 seconds (convert to dict for caching)
+        cached_result = [camera.model_dump() for camera in result]
+        set_cached("cameras_list", cached_result, ttl=60)
         return result
     except Exception as e:
         logging.error(f"Error in get_cameras: {e}", exc_info=True)
@@ -890,6 +995,28 @@ def get_cameras_api(request: Request, db: Session = Depends(get_db)):
 def sync_cameras_from_motioneye(request: Request, db: Session = Depends(get_db)):
     """Sync cameras from MotionEye to database"""
     try:
+        # Check if MotionEye is accessible before attempting sync
+        try:
+            motioneye_check = requests.get(f"{MOTIONEYE_URL}/config/list", timeout=5)
+            if motioneye_check.status_code != 200:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"MotionEye is not accessible (status {motioneye_check.status_code}). Please ensure MotionEye is running at {MOTIONEYE_URL}"
+                )
+        except requests.exceptions.Timeout:
+            raise HTTPException(
+                status_code=503,
+                detail=f"MotionEye connection timeout. Please ensure MotionEye is running at {MOTIONEYE_URL}"
+            )
+        except requests.exceptions.ConnectionError:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Cannot connect to MotionEye at {MOTIONEYE_URL}. Please ensure MotionEye is running."
+            )
+        except Exception as e:
+            logging.warning(f"MotionEye connectivity check failed: {e}")
+            # Continue anyway - let sync_motioneye_cameras handle it
+        
         result = sync_motioneye_cameras(db, motioneye_client, Camera)
         # Log successful sync
         log_audit_event(
@@ -904,6 +1031,9 @@ def sync_cameras_from_motioneye(request: Request, db: Session = Depends(get_db))
             }
         )
         return result
+    except HTTPException:
+        # Re-raise HTTP exceptions (like the ones we just created)
+        raise
     except Exception as e:
         db.rollback()
         # Log failed sync
@@ -1086,106 +1216,231 @@ def get_detections(
     db: Session = Depends(get_db)
 ):
     """Get detections with optional filtering and pagination"""
-    query = db.query(Detection)
-    
-    if camera_id is not None:
-        query = query.filter(Detection.camera_id == camera_id)
-    
-    # Apply ordering first
-    query = query.order_by(Detection.timestamp.desc())
-    
-    # Apply offset if provided
-    if offset is not None:
-        query = query.offset(offset)
-    
-    # Apply limit if provided, otherwise default to 50
-    if limit is not None:
-        query = query.limit(limit)
-    else:
-        query = query.limit(50)
-    
-    detections = query.all()
-    
-    # Batch-fetch all cameras to avoid N+1 queries
-    camera_ids = {d.camera_id for d in detections}
-    cameras = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(camera_ids)).all()}
-    
-    # Convert to response models with media URLs
-    result = []
-    for detection in detections:
-        camera = cameras.get(detection.camera_id)
-        camera_name = camera.name if camera else f"Camera {detection.camera_id}"
+    try:
+        # First, let's verify the database connection and get a simple count
+        total_count = db.query(Detection).count()
+        logging.info(f"Total detections in database: {total_count}")
         
-        # Extract full taxonomy from detections_json if available
-        full_taxonomy = None
-        if detection.detections_json:
+        query = db.query(Detection)
+        
+        if camera_id is not None:
+            query = query.filter(Detection.camera_id == camera_id)
+        
+        if species is not None:
+            query = query.filter(Detection.species.ilike(f"%{species}%"))
+        
+        if start_date:
             try:
-                detections_data = json.loads(detection.detections_json)
-                if "predictions" in detections_data and detections_data["predictions"]:
-                    full_taxonomy = detections_data["predictions"][0].get("prediction", detection.species)
-                elif "species" in detections_data:
-                    full_taxonomy = detections_data["species"]
-            except:
-                full_taxonomy = detection.species
+                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query = query.filter(Detection.timestamp >= start_dt)
+            except ValueError:
+                pass  # Invalid date format, ignore
         
-        detection_dict = {
-            "id": detection.id,
-            "camera_id": detection.camera_id,
-            "timestamp": detection.timestamp,
-            "species": detection.species,
-            "full_taxonomy": full_taxonomy,  # Add full taxonomy information
-            "confidence": detection.confidence,
-            "image_path": detection.image_path,
-            "file_size": detection.file_size,
-            "image_width": detection.image_width,
-            "image_height": detection.image_height,
-            "image_quality": detection.image_quality,
-            "prediction_score": detection.prediction_score,
-            "detections_json": detection.detections_json,
-            "media_url": None,  # Will be set below
-            "camera_name": camera_name  # Add camera name to response
-        }
-        
-        # Generate media URL from image path
-        if detection.image_path:
+        if end_date:
             try:
-                # Normalize path for both Windows and Linux
-                path = detection.image_path.replace("\\", "/")
-                parts = path.split("/")
-                # Look for motioneye_media/CameraX/date/filename or archived_photos/common_name/camera/date/filename
-                if "motioneye_media" in parts:
-                    idx = parts.index("motioneye_media")
-                    if len(parts) > idx + 3:
-                        camera_folder = parts[idx + 1]  # Camera1
-                        date_folder = parts[idx + 2]    # 2025-07-15
-                        filename = parts[idx + 3]       # 11-00-07.jpg
-                        detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
-                elif "archived_photos" in parts:
-                    idx = parts.index("archived_photos")
-                    if len(parts) > idx + 3:
-                        # archived_photos/common_name/camera/date/filename
-                        species_name = parts[idx + 1]    # human, vehicle, etc.
-                        camera_folder = parts[idx + 2]   # 1, 2, etc.
-                        date_folder = parts[idx + 3]    # 2025-08-11
-                        filename = parts[idx + 4]        # 13-08-44.jpg
-                        
-                        # Keep the original camera folder name (don't add "Camera" prefix)
-                        # This matches the actual file structure: archived_photos/human/2/2025-08-11/13-08-44.jpg
-                        detection_dict["media_url"] = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query = query.filter(Detection.timestamp <= end_dt)
+            except ValueError:
+                pass  # Invalid date format, ignore
+        
+        # Apply search filter if provided (searches species, image_path, and camera name)
+        if search:
+            search_term = f"%{search}%"
+            # Join with Camera table to search camera names
+            query = query.join(Camera, Detection.camera_id == Camera.id).filter(
+                or_(
+                    Detection.species.ilike(search_term),
+                    Detection.image_path.ilike(search_term),
+                    Camera.name.ilike(search_term)
+                )
+            )
+        else:
+            # No join needed if not searching
+            pass
+        
+        # Apply ordering first
+        query = query.order_by(Detection.timestamp.desc())
+        
+        # Apply offset if provided
+        if offset is not None:
+            query = query.offset(offset)
+        
+        # Apply limit if provided, otherwise default to 50
+        if limit is not None:
+            query = query.limit(limit)
+        else:
+            query = query.limit(50)
+        
+        detections = query.all()
+        logging.info(f"Query returned {len(detections)} detections from database")
+    
+        # Batch-fetch all cameras to avoid N+1 queries
+        camera_ids = {d.camera_id for d in detections if d.camera_id is not None}
+        cameras = {}
+        if camera_ids:
+            cameras = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(camera_ids)).all()}
+    
+        # Convert to response models with media URLs
+        result = []
+        for detection in detections:
+            try:
+                camera = cameras.get(detection.camera_id) if detection.camera_id else None
+                # Ensure camera_name is always a non-empty string (required by DetectionResponse)
+                if camera and camera.name and str(camera.name).strip():
+                    camera_name = str(camera.name).strip()
+                elif detection.camera_id:
+                    camera_name = f"Camera {detection.camera_id}"
+                else:
+                    camera_name = "Unknown Camera"
+                
+                # Extract full taxonomy from detections_json if available
+                full_taxonomy = None
+                if detection.detections_json:
+                    try:
+                        detections_data = json.loads(detection.detections_json)
+                        if "predictions" in detections_data and detections_data["predictions"]:
+                            full_taxonomy = detections_data["predictions"][0].get("prediction", detection.species)
+                        elif "species" in detections_data:
+                            full_taxonomy = detections_data["species"]
+                    except:
+                        full_taxonomy = detection.species or "Unknown"
+                
+                # Ensure all required fields have valid values for DetectionResponse
+                # DetectionBase requires: camera_id >= 1, species (non-empty), confidence (0.0-1.0), image_path (non-empty with valid extension)
+                camera_id_val = int(detection.camera_id) if detection.camera_id and detection.camera_id >= 1 else 1
+                species_val = str(detection.species).strip() if detection.species and str(detection.species).strip() else "Unknown"
+                confidence_val = float(detection.confidence) if detection.confidence is not None else 0.0
+                confidence_val = max(0.0, min(1.0, confidence_val))  # Clamp to 0.0-1.0
+                
+                # Normalize image_path to ensure it passes validation
+                # The validator requires either a valid image extension or a temp path
+                if detection.image_path and str(detection.image_path).strip():
+                    image_path_val = str(detection.image_path).strip()
+                    # Check if it has a valid extension
+                    valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+                    has_valid_ext = any(image_path_val.lower().endswith(ext) for ext in valid_extensions)
+                    # Check if it's a temp path
+                    is_temp_path = image_path_val.startswith('/tmp') or image_path_val.startswith('C:\\') or 'temp' in image_path_val.lower()
+                    # If neither, add .jpg extension to make it valid
+                    if not has_valid_ext and not is_temp_path:
+                        image_path_val = image_path_val + '.jpg'
+                else:
+                    # Default to a valid temp path
+                    image_path_val = "/tmp/unknown.jpg"
+                
+                # Fix detections_json - it might be stored as Python dict string instead of JSON
+                # The validator requires it to be valid JSON or None
+                detections_json_val = None
+                if detection.detections_json:
+                    try:
+                        # Try to parse as JSON first
+                        json.loads(detection.detections_json)
+                        detections_json_val = detection.detections_json  # Already valid JSON
+                    except (json.JSONDecodeError, TypeError):
+                        # If it's a Python dict string, convert it to JSON
+                        try:
+                            if isinstance(detection.detections_json, str):
+                                # Try to eval it as Python literal (dict)
+                                parsed = ast.literal_eval(detection.detections_json)
+                                detections_json_val = json.dumps(parsed)  # Convert to JSON string
+                                # Verify the converted JSON is valid
+                                json.loads(detections_json_val)
+                            else:
+                                detections_json_val = json.dumps(detection.detections_json)
+                                # Verify the converted JSON is valid
+                                json.loads(detections_json_val)
+                        except Exception as e:
+                            # If all else fails, set to None (invalid JSON will fail validation)
+                            logging.warning(f"Could not convert detections_json for detection {detection.id} to valid JSON: {e}")
+                            detections_json_val = None
+                
+                detection_dict = {
+                    "id": detection.id,
+                    "camera_id": camera_id_val,
+                    "timestamp": detection.timestamp,
+                    "species": species_val,
+                    "full_taxonomy": full_taxonomy,
+                    "confidence": confidence_val,
+                    "image_path": image_path_val,
+                    "file_size": detection.file_size,
+                    "image_width": detection.image_width,
+                    "image_height": detection.image_height,
+                    "image_quality": detection.image_quality,
+                    "prediction_score": float(detection.prediction_score) if detection.prediction_score is not None else None,
+                    "detections_json": detections_json_val,
+                    "media_url": None,  # Will be set below
+                    "camera_name": str(camera_name)  # Add camera name to response
+                }
+        
+                # Generate media URL from image path
+                if detection.image_path:
+                    try:
+                        # Normalize path for both Windows and Linux
+                        path = detection.image_path.replace("\\", "/")
+                        parts = path.split("/")
+                        # Look for motioneye_media/CameraX/date/filename or archived_photos/common_name/camera/date/filename
+                        if "motioneye_media" in parts:
+                            idx = parts.index("motioneye_media")
+                            if len(parts) > idx + 3:
+                                camera_folder = parts[idx + 1]  # Camera1
+                                date_folder = parts[idx + 2]    # 2025-07-15
+                                filename = parts[idx + 3]       # 11-00-07.jpg
+                                detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
+                        elif "archived_photos" in parts:
+                            idx = parts.index("archived_photos")
+                            if len(parts) > idx + 4:
+                                # archived_photos/common_name/camera/date/filename
+                                species_name = parts[idx + 1]    # human, vehicle, etc.
+                                camera_folder = parts[idx + 2]   # 1, 2, etc.
+                                date_folder = parts[idx + 3]    # 2025-08-11
+                                filename = parts[idx + 4]        # 13-08-44.jpg
+                                
+                                # Keep the original camera folder name (don't add "Camera" prefix)
+                                # This matches the actual file structure: archived_photos/human/2/2025-08-11/13-08-44.jpg
+                                detection_dict["media_url"] = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+                    except Exception as e:
+                        logging.warning(f"Error generating media_url for detection {detection.id}: {e}")
+                        detection_dict["media_url"] = None
+                # Validate the detection_dict before creating DetectionResponse
+                # This helps catch validation errors early
+                try:
+                    detection_response = DetectionResponse(**detection_dict)
+                    result.append(detection_response)
+                except Exception as validation_error:
+                    # Log the validation error with more details
+                    logging.error(f"Validation error for detection {detection.id}: {validation_error}")
+                    logging.error(f"Detection data: camera_id={detection_dict.get('camera_id')}, species={detection_dict.get('species')}, image_path={detection_dict.get('image_path')}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    # Skip this detection and continue
+                    continue
             except Exception as e:
-                print(f"Error generating media_url for detection {detection.id}: {e}")
-                detection_dict["media_url"] = None
-        result.append(DetectionResponse(**detection_dict))
-    return result
+                logging.error(f"Error processing detection {detection.id}: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
+                # Skip this detection and continue
+                continue
+        logging.info(f"Successfully processed {len(result)} detections out of {len(detections)}")
+        return result
+    except Exception as e:
+        logging.error(f"Error in get_detections endpoint: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error fetching detections: {str(e)}")
 
 @app.get("/api/detections", response_model=List[DetectionResponse])
 def get_detections_api(
     camera_id: Optional[int] = None,
     limit: Optional[int] = None,
+    offset: Optional[int] = None,
+    species: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """Alias for /detections to support frontend API calls"""
-    return get_detections(camera_id, limit, db)
+    return get_detections(camera_id, limit, offset, species, start_date, end_date, search, db)
 
 @app.post("/detections", response_model=DetectionResponse)
 def create_detection(request: Request, detection: DetectionCreate, db: Session = Depends(get_db)):
@@ -1270,7 +1525,7 @@ async def process_image_with_speciesnet(
             raise HTTPException(status_code=500, detail=predictions["error"])
         
         # Save detection to database
-        if "predictions" in predictions and predictions["predictions"]:
+        if "predictions" in predictions and predictions["predictions"] and len(predictions["predictions"]) > 0:
             pred = predictions["predictions"][0]
             
             # Create detection record
@@ -1335,6 +1590,26 @@ async def process_image_with_speciesnet(
                 except Exception as e:
                     logging.warning(f"Failed to send notification: {e}")
             
+            # Trigger webhooks for detection
+            try:
+                from services.webhooks import WebhookService
+                webhook_service = WebhookService(db)
+                detection_data = {
+                    "id": db_detection.id,
+                    "camera_id": camera_id or 1,
+                    "species": pred.get("prediction", "Unknown"),
+                    "confidence": pred.get("prediction_score", 0.0),
+                    "timestamp": db_detection.timestamp.isoformat() if db_detection.timestamp else None,
+                    "image_path": db_detection.image_path
+                }
+                webhook_service.trigger_detection_webhooks(
+                    detection_data=detection_data,
+                    confidence=pred.get("prediction_score", 0.0),
+                    species=pred.get("prediction", "Unknown")
+                )
+            except Exception as e:
+                logging.warning(f"Failed to trigger webhooks: {e}")
+            
             return {
                 "detection": db_detection,
                 "predictions": predictions
@@ -1390,7 +1665,7 @@ async def _process_image_background(
         task_tracker.update_task(task_id, progress=0.6, message="Saving detection...")
         
         # Save detection to database
-        if "predictions" in predictions and predictions["predictions"]:
+        if "predictions" in predictions and predictions["predictions"] and len(predictions["predictions"]) > 0:
             pred = predictions["predictions"][0]
             
             detection_data = {
@@ -1503,7 +1778,7 @@ async def capture_thingino_image(request: Request, camera_id: int, db: Session =
             species = "Unknown"
             confidence = 0.0
             
-            if "predictions" in predictions and predictions["predictions"]:
+            if "predictions" in predictions and predictions["predictions"] and len(predictions["predictions"]) > 0:
                 pred = predictions["predictions"][0]
                 species = pred.get("prediction", "Unknown")
                 confidence = pred.get("prediction_score", 0.0)
@@ -1568,6 +1843,27 @@ async def capture_thingino_image(request: Request, camera_id: int, db: Session =
                     )
                 except Exception as e:
                     logging.warning(f"Failed to send notification: {e}")
+            
+            # Trigger webhooks for detection
+            try:
+                from services.webhooks import WebhookService
+                webhook_service = WebhookService(db)
+                detection_data = {
+                    "id": db_detection.id,
+                    "camera_id": camera_id,
+                    "camera_name": camera.name,
+                    "species": species,
+                    "confidence": confidence,
+                    "timestamp": db_detection.timestamp.isoformat() if db_detection.timestamp else None,
+                    "image_url": f"/api/thingino/image/{db_detection.id}"
+                }
+                webhook_service.trigger_detection_webhooks(
+                    detection_data=detection_data,
+                    confidence=confidence,
+                    species=species
+                )
+            except Exception as e:
+                logging.warning(f"Failed to trigger webhooks: {e}")
             
             # Broadcast the new detection to connected clients
             detection_event = {
@@ -1701,12 +1997,12 @@ async def thingino_webhook(request: Request, db: Session = Depends(get_db)):
                 species = "Unknown"
                 confidence = 0.0
                 
-                if "predictions" in predictions and predictions["predictions"]:
+                if "predictions" in predictions and predictions["predictions"] and len(predictions["predictions"]) > 0:
                     pred = predictions["predictions"][0]
                     species = pred.get("prediction", "Unknown")
                     confidence = pred.get("prediction_score", 0.0)
-                
-                # Save detection to database
+            
+            # Save detection to database
                 detection_data = {
                     "camera_id": camera_id,
                     "timestamp": datetime.now(),
@@ -1931,6 +2227,9 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
         timestamp = payload["timestamp"]
         event_type = payload["event_type"]
 
+        # Log webhook receipt for debugging camera detection issues
+        logger.info(f"MotionEye webhook received - camera_id: {camera_id}, file_path: {file_path}, payload keys: {list(data.keys()) if data else 'empty'}")
+
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("MotionEye webhook payload: %s", data)
 
@@ -2027,7 +2326,7 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
             
             # Try different possible response structures
             if isinstance(predictions, dict):
-                if "predictions" in predictions and predictions["predictions"]:
+                if "predictions" in predictions and predictions["predictions"] and len(predictions["predictions"]) > 0:
                     pred = predictions["predictions"][0]
                     species = pred.get("prediction", "Unknown")
                     confidence = pred.get("prediction_score", 0.0)
@@ -2068,9 +2367,9 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
                 # Check for "no cv result" or similar
                 if any("no cv" in p.lower() or "no cv result" in p.lower() for p in parts):
                     species = "Unknown"
-                # Check if the last meaningful part is "blank"
+                # Check if the last meaningful part is "blank" - convert to "Unknown" so it gets saved
                 elif parts and parts[-1].lower() == "blank":
-                    species = "blank"
+                    species = "Unknown"  # Save as Unknown instead of skipping
                 # Try to find genus and species (last two meaningful parts)
                 elif len(parts) >= 2:
                     # Get the last few meaningful parts (skip empty/single-letter ones)
@@ -2123,10 +2422,10 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
                 else:
                     species = "Unknown"
             
-            # Skip "blank" detections - don't save them to database
+            # Convert "blank" to "Unknown" so detections are saved (user can filter in frontend)
             if species and species.lower().strip() == "blank":
-                logger.debug("Skipping blank detection from %s", local_file_path)
-                return {"status": "skipped", "message": "Blank image (no wildlife detected)"}
+                species = "Unknown"
+                logger.debug("Converting blank detection to Unknown: %s", local_file_path)
             
             # Save detection to database
             detection_data = {
@@ -2175,6 +2474,27 @@ async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
                 )
             except Exception as e:
                 logging.warning(f"Failed to send notification: {e}")
+        
+        # Trigger webhooks for detection
+        try:
+            from services.webhooks import WebhookService
+            webhook_service = WebhookService(db)
+            webhook_detection_data = {
+                "id": db_detection.id,
+                "camera_id": camera_id,
+                "camera_name": camera_name,
+                "species": detection_data["species"],
+                "confidence": detection_data["confidence"],
+                "timestamp": db_detection.timestamp.isoformat() if db_detection.timestamp else None,
+                "image_url": f"/media/{extracted_camera_name}/{file_date}/{os.path.basename(local_file_path)}"
+            }
+            webhook_service.trigger_detection_webhooks(
+                detection_data=webhook_detection_data,
+                confidence=detection_data["confidence"],
+                species=detection_data["species"]
+            )
+        except Exception as e:
+            logging.warning(f"Failed to trigger webhooks: {e}")
         
         logger.info(
             "Saved detection %s from camera %s (%s) species=%s confidence=%.2f",
@@ -2404,6 +2724,7 @@ def analytics_detections_unique_species_count(
 @app.get("/api/analytics/species")
 @limiter.limit("60/minute")
 def get_species_analytics(
+    request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     camera_id: Optional[int] = None,
@@ -2424,9 +2745,29 @@ def get_species_analytics(
         if camera_id:
             query = query.filter(Detection.camera_id == camera_id)
         if start_date:
-            query = query.filter(Detection.timestamp >= start_date)
+            try:
+                # Parse date string to datetime object
+                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query = query.filter(Detection.timestamp >= start_dt)
+            except (ValueError, AttributeError) as e:
+                logging.warning(f"Invalid start_date format: {start_date}, error: {e}")
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    query = query.filter(Detection.timestamp >= start_dt)
+                except ValueError:
+                    logging.error(f"Could not parse start_date: {start_date}")
         if end_date:
-            query = query.filter(Detection.timestamp <= end_date)
+            try:
+                # Parse date string to datetime object
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query = query.filter(Detection.timestamp <= end_dt)
+            except (ValueError, AttributeError) as e:
+                logging.warning(f"Invalid end_date format: {end_date}, error: {e}")
+                try:
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                    query = query.filter(Detection.timestamp <= end_dt)
+                except ValueError:
+                    logging.error(f"Could not parse end_date: {end_date}")
         
         detections = query.all()
         
@@ -2441,11 +2782,13 @@ def get_species_analytics(
                     "detections": []
                 }
             species_stats[species]["count"] += 1
-            species_stats[species]["total_confidence"] += detection.confidence
+            # Handle null confidence values
+            confidence = detection.confidence if detection.confidence is not None else 0.0
+            species_stats[species]["total_confidence"] += confidence
             species_stats[species]["detections"].append({
                 "id": detection.id,
-                "timestamp": detection.timestamp.isoformat(),
-                "confidence": detection.confidence,
+                "timestamp": detection.timestamp.isoformat() if detection.timestamp else None,
+                "confidence": confidence,
                 "camera_id": detection.camera_id
             })
         
@@ -2475,6 +2818,7 @@ def get_species_analytics(
 @app.get("/api/analytics/timeline")
 @limiter.limit("60/minute")
 def get_timeline_analytics(
+    request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     camera_id: Optional[int] = None,
@@ -2493,9 +2837,29 @@ def get_timeline_analytics(
         if camera_id:
             query = query.filter(Detection.camera_id == camera_id)
         if start_date:
-            query = query.filter(Detection.timestamp >= start_date)
+            try:
+                # Parse date string to datetime object
+                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query = query.filter(Detection.timestamp >= start_dt)
+            except (ValueError, AttributeError) as e:
+                logging.warning(f"Invalid start_date format: {start_date}, error: {e}")
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    query = query.filter(Detection.timestamp >= start_dt)
+                except ValueError:
+                    logging.error(f"Could not parse start_date: {start_date}")
         if end_date:
-            query = query.filter(Detection.timestamp <= end_date)
+            try:
+                # Parse date string to datetime object
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query = query.filter(Detection.timestamp <= end_dt)
+            except (ValueError, AttributeError) as e:
+                logging.warning(f"Invalid end_date format: {end_date}, error: {e}")
+                try:
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                    query = query.filter(Detection.timestamp <= end_dt)
+                except ValueError:
+                    logging.error(f"Could not parse end_date: {end_date}")
         
         detections = query.all()
         
@@ -2546,6 +2910,7 @@ def get_timeline_analytics(
 @app.get("/api/analytics/cameras")
 @limiter.limit("60/minute")
 def get_camera_analytics(
+    request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     db: Session = Depends(get_db)
@@ -2563,9 +2928,29 @@ def get_camera_analytics(
         
         # Apply date filters
         if start_date:
-            query = query.filter(Detection.timestamp >= start_date)
+            try:
+                # Parse date string to datetime object
+                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query = query.filter(Detection.timestamp >= start_dt)
+            except (ValueError, AttributeError) as e:
+                logging.warning(f"Invalid start_date format: {start_date}, error: {e}")
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    query = query.filter(Detection.timestamp >= start_dt)
+                except ValueError:
+                    logging.error(f"Could not parse start_date: {start_date}")
         if end_date:
-            query = query.filter(Detection.timestamp <= end_date)
+            try:
+                # Parse date string to datetime object
+                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query = query.filter(Detection.timestamp <= end_dt)
+            except (ValueError, AttributeError) as e:
+                logging.warning(f"Invalid end_date format: {end_date}, error: {e}")
+                try:
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                    query = query.filter(Detection.timestamp <= end_dt)
+                except ValueError:
+                    logging.error(f"Could not parse end_date: {end_date}")
         
         detections = query.all()
         
@@ -2624,74 +3009,31 @@ def get_camera_analytics(
 
 
 @app.get("/health")
-@limiter.limit("120/minute")
-def health_check(db: Session = Depends(get_db)):
+async def health_check(request: Request):
     """
     Basic health check endpoint for monitoring tools
     
     Returns 200 if system is healthy, 503 if unhealthy
     """
-    try:
-        # Check database connection
-        db.execute(text("SELECT 1"))
-        db_status = "healthy"
-    except Exception as e:
-        logging.error(f"Database health check failed: {e}")
-        db_status = "unhealthy"
-    
-    # Check MotionEye
-    try:
-        motioneye_status = motioneye_client.get_status()
-        motioneye_healthy = motioneye_status == "running"
-    except Exception:
-        motioneye_healthy = False
-    
-    # Check SpeciesNet
-    try:
-        speciesnet_status = speciesnet_processor.get_status()
-        speciesnet_healthy = speciesnet_status == "running"
-    except Exception:
-        speciesnet_healthy = False
-    
-    # Overall health
-    overall_healthy = db_status == "healthy"
-    
-    status_code = 200 if overall_healthy else 503
-    
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "status": "healthy" if overall_healthy else "degraded",
-            "timestamp": datetime.now().isoformat(),
-            "dependencies": {
-                "database": {
-                    "status": db_status,
-                    "required": True
-                },
-                "motioneye": {
-                    "status": "healthy" if motioneye_healthy else "unhealthy",
-                    "required": False
-                },
-                "speciesnet": {
-                    "status": "healthy" if speciesnet_healthy else "unhealthy",
-                    "required": False
-                }
-            },
-            "uptime_seconds": time.time() - app.state.start_time if hasattr(app.state, 'start_time') else None
-        }
-    )
+    # Quick health check - return immediately, check services in background
+    # This prevents the health endpoint from blocking
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Backend is running"
+    }
 
 
 @app.get("/api/health")
 @limiter.limit("120/minute")
-def health_check_api(db: Session = Depends(get_db)):
+async def health_check_api(request: Request, db: Session = Depends(get_db)):
     """Alias for /health endpoint"""
-    return health_check(db)
+    return await health_check(request, db)
 
 
 @app.get("/health/detailed")
 @limiter.limit("60/minute")
-def detailed_health_check(db: Session = Depends(get_db)):
+async def detailed_health_check(request: Request, db: Session = Depends(get_db)):
     """
     Detailed health check with metrics for monitoring tools
     
@@ -2723,27 +3065,43 @@ def detailed_health_check(db: Session = Depends(get_db)):
             detection_count = None
             camera_count = None
         
-        # MotionEye check
+        # MotionEye check with timeout (increased to 30s to handle slow responses)
         motioneye_start = time.time()
+        motioneye_healthy = False
+        motioneye_response_time = None
+        motioneye_error = None
         try:
-            motioneye_status = motioneye_client.get_status()
+            loop = asyncio.get_event_loop()
+            motioneye_status = await asyncio.wait_for(
+                loop.run_in_executor(None, motioneye_client.get_status),
+                timeout=30.0  # Increased from 3s to 30s to handle slow MotionEye responses
+            )
             motioneye_response_time = (time.time() - motioneye_start) * 1000
             motioneye_healthy = motioneye_status == "running"
-            motioneye_error = None
+        except asyncio.TimeoutError:
+            motioneye_response_time = None
+            motioneye_error = "timeout"
         except Exception as e:
-            motioneye_healthy = False
             motioneye_response_time = None
             motioneye_error = str(e)
         
-        # SpeciesNet check
+        # SpeciesNet check with timeout (increased to 40s to handle slow responses)
         speciesnet_start = time.time()
+        speciesnet_healthy = False
+        speciesnet_response_time = None
+        speciesnet_error = None
         try:
-            speciesnet_status = speciesnet_processor.get_status()
+            loop = asyncio.get_event_loop()
+            speciesnet_status = await asyncio.wait_for(
+                loop.run_in_executor(None, speciesnet_processor.get_status),
+                timeout=40.0  # Increased from 5s to 40s to handle slow SpeciesNet responses
+            )
             speciesnet_response_time = (time.time() - speciesnet_start) * 1000
             speciesnet_healthy = speciesnet_status == "running"
-            speciesnet_error = None
+        except asyncio.TimeoutError:
+            speciesnet_response_time = None
+            speciesnet_error = "timeout"
         except Exception as e:
-            speciesnet_healthy = False
             speciesnet_response_time = None
             speciesnet_error = str(e)
         
@@ -2962,13 +3320,21 @@ class PhotoScanner:
                 return
             species = "Unknown"
             confidence = 0.0
-            if "predictions" in speciesnet_response and speciesnet_response["predictions"]:
+            if "predictions" in speciesnet_response and speciesnet_response["predictions"] and len(speciesnet_response["predictions"]) > 0:
                 pred = speciesnet_response["predictions"][0]
                 species = pred.get("prediction", "Unknown")
                 confidence = pred.get("prediction_score", 0.0)
             elif "species" in speciesnet_response:
                 species = speciesnet_response.get("species", "Unknown")
                 confidence = speciesnet_response.get("confidence", 0.0)
+            
+            # Log raw SpeciesNet response for debugging (first few detections only)
+            if hasattr(self, '_debug_count'):
+                self._debug_count += 1
+            else:
+                self._debug_count = 0
+            if self._debug_count < 5:
+                logging.debug(f"[PhotoScanner] Raw SpeciesNet response for {photo_info['filename']}: species={species}, confidence={confidence}")
             
             # Clean up species name (similar to webhook handler)
             if species and ";" in species:
@@ -2984,9 +3350,9 @@ class PhotoScanner:
                 # Check for "no cv result" or similar
                 if any("no cv" in p.lower() or "no cv result" in p.lower() for p in parts):
                     species = "Unknown"
-                # Check if the last meaningful part is "blank"
+                # Check if the last meaningful part is "blank" - convert to "Unknown" so it gets saved
                 elif parts and parts[-1].lower() == "blank":
-                    species = "blank"
+                    species = "Unknown"  # Save as Unknown instead of skipping
                 # Try to find genus and species (last two meaningful parts)
                 elif len(parts) >= 2:
                     # Get the last few meaningful parts (skip empty/single-letter ones)
@@ -3039,10 +3405,10 @@ class PhotoScanner:
                 else:
                     species = "Unknown"
             
-            # Skip "blank" detections - don't save them to database
+            # Convert "blank" to "Unknown" so detections are saved (user can filter in frontend)
             if species and species.lower().strip() == "blank":
-                print(f"[PhotoScanner] Skipping blank detection (no wildlife): {photo_info['filename']}")
-                return  # Don't save blank detections
+                species = "Unknown"
+                logging.debug(f"[PhotoScanner] Converting blank detection to Unknown: {photo_info['filename']}")
             
             archived_path = self.archive_photo(photo_info['file_path'], species, camera_id)
             detection_data = {
@@ -3112,7 +3478,9 @@ class PhotoScanner:
         """Call SpeciesNet server to process image with proper rate limiting"""
         try:
             # Use the existing SpeciesNet processor that already works
-            result = speciesnet_processor.process_image(image_path)
+            # Offload synchronous request to executor
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, speciesnet_processor.process_image, image_path)
             
             # Check if the result contains an error
             if "error" in result:
@@ -3129,17 +3497,27 @@ class PhotoScanner:
         """Main scanning and processing function with intelligent rate limiting"""
         print("Starting photo scanner...")
         try:
-            speciesnet_status = speciesnet_processor.get_status()
+            loop = asyncio.get_running_loop()
+            # Offload status check
+            speciesnet_status = await loop.run_in_executor(None, speciesnet_processor.get_status)
             if speciesnet_status != "running":
                 print(f"SpeciesNet server not healthy ({speciesnet_status}), skipping photo processing")
                 return
+            
+            # Load processed files from DB (synchronous but fast enough)
             self.load_processed_files()
-            unprocessed = self.scan_for_unprocessed_photos()
+            
+            # Run file scan in executor to avoid blocking the event loop
+            # This is critical as hashing thousands of files takes a long time
+            unprocessed = await loop.run_in_executor(None, self.scan_for_unprocessed_photos)
+            
             if unprocessed:
                 print(f"[PhotoScanner] Processing {len(unprocessed)} photos this cycle (processing all)")
                 for i, photo in enumerate(unprocessed):
                     print(f"[PhotoScanner] Processing photo {i+1}/{len(unprocessed)}: {photo['filename']}")
-                    if speciesnet_processor.get_status() != "running":
+                    # Offload status check
+                    status = await loop.run_in_executor(None, speciesnet_processor.get_status)
+                    if status != "running":
                         print("SpeciesNet server became unhealthy, stopping processing")
                         break
                     await self.process_photo(photo)
@@ -3555,7 +3933,7 @@ def get_audit_logs_api(
 @limiter.limit("10/minute")  # Rate limit: 10 requests per minute (expensive operation)
 def export_detections(
     request: Request,
-    format: str = "csv",  # csv or json
+    format: str = "csv",  # csv, json, or pdf
     camera_id: Optional[int] = None,
     species: Optional[str] = None,
     start_date: Optional[str] = None,
@@ -3563,9 +3941,8 @@ def export_detections(
     limit: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
-    """Export detections to CSV or JSON format"""
+    """Export detections to CSV, JSON, or PDF format"""
     from fastapi.responses import Response
-    from sqlalchemy import or_
     
     # Build query with filters
     query = db.query(Detection)
@@ -3651,6 +4028,118 @@ def export_detections(
                 "Content-Disposition": f"attachment; filename=detections_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             }
         )
+    elif format.lower() == "pdf":
+        # Generate PDF
+        try:
+            from reportlab.lib import colors  # pyright: ignore[reportMissingModuleSource]
+            from reportlab.lib.pagesizes import letter, A4  # pyright: ignore[reportMissingModuleSource]
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak  # pyright: ignore[reportMissingModuleSource]
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle  # pyright: ignore[reportMissingModuleSource]
+            from reportlab.lib.units import inch  # pyright: ignore[reportMissingModuleSource]
+            import io
+            
+            buffer = io.BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+            story = []
+            styles = getSampleStyleSheet()
+            
+            # Title
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=18,
+                textColor=colors.HexColor('#2c3e50'),
+                spaceAfter=30,
+                alignment=1  # Center
+            )
+            story.append(Paragraph("Wildlife Detection Report", title_style))
+            story.append(Spacer(1, 0.2*inch))
+            
+            # Report metadata
+            meta_style = styles['Normal']
+            story.append(Paragraph(f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", meta_style))
+            story.append(Paragraph(f"<b>Total Detections:</b> {len(detections)}", meta_style))
+            if camera_id:
+                story.append(Paragraph(f"<b>Camera ID:</b> {camera_id}", meta_style))
+            if species:
+                story.append(Paragraph(f"<b>Species Filter:</b> {species}", meta_style))
+            if start_date:
+                story.append(Paragraph(f"<b>Start Date:</b> {start_date}", meta_style))
+            if end_date:
+                story.append(Paragraph(f"<b>End Date:</b> {end_date}", meta_style))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Table data
+            table_data = [["ID", "Camera", "Timestamp", "Species", "Confidence", "Image Path"]]
+            
+            for det in detections:
+                camera_name = f"Camera {det.camera_id}"
+                camera = db.query(Camera).filter(Camera.id == det.camera_id).first()
+                if camera:
+                    camera_name = camera.name
+                
+                timestamp_str = det.timestamp.strftime('%Y-%m-%d %H:%M') if det.timestamp else "N/A"
+                confidence_str = f"{det.confidence * 100:.1f}%" if det.confidence else "N/A"
+                image_path = det.image_path or "N/A"
+                if len(image_path) > 40:
+                    image_path = image_path[:37] + "..."
+                
+                table_data.append([
+                    str(det.id),
+                    camera_name[:20],
+                    timestamp_str,
+                    (det.species or "Unknown")[:30],
+                    confidence_str,
+                    image_path
+                ])
+            
+            # Create table
+            table = Table(table_data, colWidths=[0.5*inch, 1*inch, 1.2*inch, 1.5*inch, 0.8*inch, 2*inch])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#34495e')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.grey),
+                ('FONTSIZE', (0, 1), (-1, -1), 8),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')])
+            ]))
+            
+            story.append(table)
+            doc.build(story)
+            
+            pdf_content = buffer.getvalue()
+            buffer.close()
+            
+            # Log export
+            log_audit_event(
+                db=db,
+                request=request,
+                action="EXPORT",
+                resource_type="detection",
+                details={
+                    "format": "pdf",
+                    "count": len(detections),
+                    "camera_id": camera_id,
+                    "species": species
+                }
+            )
+            
+            return Response(
+                content=pdf_content,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f"attachment; filename=detections_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                }
+            )
+        except ImportError:
+            raise HTTPException(status_code=500, detail="PDF generation requires reportlab library. Install with: pip install reportlab")
+        except Exception as e:
+            logging.error(f"PDF generation failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
     else:
         # Generate JSON
         result = []
@@ -3783,6 +4272,262 @@ def cleanup_backups_endpoint(request: Request, keep_count: int = 10, db: Session
     except Exception as e:
         logging.error(f"Backup cleanup failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+
+
+# Webhook endpoints
+@app.post("/api/webhooks", response_model=WebhookResponse)
+@limiter.limit("10/hour")
+def create_webhook(
+    request: Request,
+    webhook: WebhookCreate,
+    db: Session = Depends(get_db)
+):
+    """Create a new webhook"""
+    try:
+        db_webhook = Webhook(**webhook.model_dump())
+        db.add(db_webhook)
+        db.commit()
+        db.refresh(db_webhook)
+        
+        log_audit_event(
+            db=db,
+            request=request,
+            action="CREATE",
+            resource_type="webhook",
+            resource_id=db_webhook.id,
+            details={"name": webhook.name, "url": webhook.url, "event_type": webhook.event_type}
+        )
+        
+        return db_webhook
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to create webhook: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create webhook: {str(e)}")
+
+
+@app.get("/api/webhooks", response_model=List[WebhookResponse])
+@limiter.limit("60/minute")
+def list_webhooks(
+    request: Request,
+    is_active: Optional[bool] = None,
+    event_type: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """List all webhooks"""
+    try:
+        query = db.query(Webhook)
+        
+        if is_active is not None:
+            query = query.filter(Webhook.is_active == is_active)
+        
+        if event_type:
+            query = query.filter(Webhook.event_type == event_type)
+        
+        webhooks = query.order_by(Webhook.created_at.desc()).all()
+        return webhooks
+    except Exception as e:
+        logging.error(f"Failed to list webhooks: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list webhooks: {str(e)}")
+
+
+@app.get("/api/webhooks/{webhook_id}", response_model=WebhookResponse)
+@limiter.limit("60/minute")
+def get_webhook(
+    request: Request,
+    webhook_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get a specific webhook"""
+    webhook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
+    if not webhook:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return webhook
+
+
+@app.put("/api/webhooks/{webhook_id}", response_model=WebhookResponse)
+@limiter.limit("10/hour")
+def update_webhook(
+    request: Request,
+    webhook_id: int,
+    webhook: WebhookCreate,
+    db: Session = Depends(get_db)
+):
+    """Update a webhook"""
+    try:
+        db_webhook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
+        if not db_webhook:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+        
+        for key, value in webhook.model_dump().items():
+            setattr(db_webhook, key, value)
+        
+        db.commit()
+        db.refresh(db_webhook)
+        
+        log_audit_event(
+            db=db,
+            request=request,
+            action="UPDATE",
+            resource_type="webhook",
+            resource_id=webhook_id,
+            details={"name": webhook.name}
+        )
+        
+        return db_webhook
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to update webhook: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update webhook: {str(e)}")
+
+
+@app.delete("/api/webhooks/{webhook_id}")
+@limiter.limit("10/hour")
+def delete_webhook(
+    request: Request,
+    webhook_id: int,
+    db: Session = Depends(get_db)
+):
+    """Delete a webhook"""
+    try:
+        db_webhook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
+        if not db_webhook:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+        
+        webhook_name = db_webhook.name
+        db.delete(db_webhook)
+        db.commit()
+        
+        log_audit_event(
+            db=db,
+            request=request,
+            action="DELETE",
+            resource_type="webhook",
+            resource_id=webhook_id,
+            details={"name": webhook_name}
+        )
+        
+        return {"success": True, "message": "Webhook deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to delete webhook: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to delete webhook: {str(e)}")
+
+
+@app.post("/api/webhooks/{webhook_id}/test")
+@limiter.limit("10/hour")
+def test_webhook(
+    request: Request,
+    webhook_id: int,
+    db: Session = Depends(get_db)
+):
+    """Test a webhook by sending a test payload"""
+    try:
+        from services.webhooks import WebhookService
+        
+        webhook = db.query(Webhook).filter(Webhook.id == webhook_id).first()
+        if not webhook:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+        
+        webhook_service = WebhookService(db)
+        
+        # Send test payload
+        test_payload = {
+            "event": "test",
+            "message": "This is a test webhook from Wildlife App",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        success = webhook_service.trigger_webhook(webhook, test_payload, "test")
+        
+        return {
+            "success": success,
+            "message": "Test webhook sent successfully" if success else "Test webhook failed"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Failed to test webhook: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to test webhook: {str(e)}")
+
+
+# Configuration management endpoints
+@app.get("/api/config")
+@limiter.limit("60/minute")
+def get_config(request: Request):
+    """Get current configuration values (read-only, for UI display)"""
+    try:
+        from config import (
+            DB_HOST, DB_PORT, DB_NAME, MOTIONEYE_URL, SPECIESNET_URL,
+            NOTIFICATION_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_USER,
+            NOTIFICATION_EMAIL_FROM, NOTIFICATION_EMAIL_TO,
+            SMS_ENABLED, TWILIO_ACCOUNT_SID, TWILIO_PHONE_NUMBER,
+            BACKUP_SCHEDULE_MONTHLY_DAY, BACKUP_SCHEDULE_MONTHLY_HOUR,
+            BACKUP_RETENTION_COUNT,
+            ARCHIVAL_ENABLED, ARCHIVAL_ROOT, ARCHIVAL_RULES,
+            API_KEY_ENABLED, SESSION_EXPIRY_HOURS
+        )
+        
+        # Return config values (mask sensitive data)
+        return {
+            "DB_HOST": DB_HOST,
+            "DB_PORT": DB_PORT,
+            "DB_NAME": DB_NAME,
+            "MOTIONEYE_URL": MOTIONEYE_URL,
+            "SPECIESNET_URL": SPECIESNET_URL,
+            "NOTIFICATION_ENABLED": str(NOTIFICATION_ENABLED).lower(),
+            "SMTP_HOST": SMTP_HOST,
+            "SMTP_PORT": str(SMTP_PORT),
+            "SMTP_USER": SMTP_USER if SMTP_USER else "",
+            "NOTIFICATION_EMAIL_FROM": NOTIFICATION_EMAIL_FROM if NOTIFICATION_EMAIL_FROM else "",
+            "NOTIFICATION_EMAIL_TO": NOTIFICATION_EMAIL_TO if NOTIFICATION_EMAIL_TO else "",
+            "SMS_ENABLED": str(SMS_ENABLED).lower(),
+            "TWILIO_ACCOUNT_SID": TWILIO_ACCOUNT_SID[:10] + "..." if TWILIO_ACCOUNT_SID and len(TWILIO_ACCOUNT_SID) > 10 else "",
+            "TWILIO_PHONE_NUMBER": TWILIO_PHONE_NUMBER if TWILIO_PHONE_NUMBER else "",
+            "BACKUP_SCHEDULE_MONTHLY_DAY": str(BACKUP_SCHEDULE_MONTHLY_DAY),
+            "BACKUP_SCHEDULE_MONTHLY_HOUR": str(BACKUP_SCHEDULE_MONTHLY_HOUR),
+            "BACKUP_RETENTION_COUNT": str(BACKUP_RETENTION_COUNT),
+            "ARCHIVAL_ENABLED": str(ARCHIVAL_ENABLED).lower(),
+            "ARCHIVAL_ROOT": ARCHIVAL_ROOT,
+            "ARCHIVAL_MIN_CONFIDENCE": str(ARCHIVAL_RULES.get("min_confidence", 0.8)),
+            "ARCHIVAL_MIN_AGE_DAYS": str(ARCHIVAL_RULES.get("min_age_days", 30)),
+            "API_KEY_ENABLED": str(API_KEY_ENABLED).lower(),
+            "SESSION_EXPIRY_HOURS": str(SESSION_EXPIRY_HOURS),
+            "note": "Configuration changes require editing .env file and restarting the server"
+        }
+    except Exception as e:
+        logging.error(f"Failed to get config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get config: {str(e)}")
+
+
+@app.post("/api/config")
+@limiter.limit("10/hour")
+def update_config(request: Request, configs: Dict[str, str], db: Session = Depends(get_db)):
+    """Update configuration (note: actual changes require .env file modification)"""
+    try:
+        # Log the attempt
+        log_audit_event(
+            db=db,
+            request=request,
+            action="CONFIG_UPDATE",
+            resource_type="configuration",
+            details={
+                "keys_updated": list(configs.keys()),
+                "note": "Configuration UI is read-only. Changes require .env file modification."
+            }
+        )
+        
+        return {
+            "success": True,
+            "message": "Configuration UI is for viewing only. To change settings, edit the .env file and restart the server.",
+            "note": "See ENV_SETUP.md for configuration instructions"
+        }
+    except Exception as e:
+        logging.error(f"Failed to update config: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to update config: {str(e)}")
 
 
 @app.post("/api/auth/register")

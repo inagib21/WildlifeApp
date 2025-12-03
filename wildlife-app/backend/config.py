@@ -28,7 +28,7 @@ THINGINO_CAMERA_PASSWORD = os.getenv("THINGINO_CAMERA_PASSWORD", "ismart12")
 # CORS configuration
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000"
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
 ).split(",")
 
 # Email notification configuration (optional)
@@ -40,10 +40,16 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 NOTIFICATION_EMAIL_FROM = os.getenv("NOTIFICATION_EMAIL_FROM", "")
 NOTIFICATION_EMAIL_TO = os.getenv("NOTIFICATION_EMAIL_TO", "")  # Comma-separated list
 
+# SMS notification configuration (optional, via Twilio)
+SMS_ENABLED = os.getenv("SMS_ENABLED", "false").lower() == "true"
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
+SMS_PHONE_NUMBERS = os.getenv("SMS_PHONE_NUMBERS", "")  # Comma-separated list of phone numbers
+
 # Backup configuration
-BACKUP_SCHEDULE_DAILY_HOUR = int(os.getenv("BACKUP_SCHEDULE_DAILY_HOUR", "2"))
-BACKUP_SCHEDULE_WEEKLY_DAY_OF_WEEK = int(os.getenv("BACKUP_SCHEDULE_WEEKLY_DAY_OF_WEEK", "6"))  # Sunday
-BACKUP_SCHEDULE_WEEKLY_HOUR = int(os.getenv("BACKUP_SCHEDULE_WEEKLY_HOUR", "3"))
+BACKUP_SCHEDULE_MONTHLY_DAY = int(os.getenv("BACKUP_SCHEDULE_MONTHLY_DAY", "1"))  # 1st of month
+BACKUP_SCHEDULE_MONTHLY_HOUR = int(os.getenv("BACKUP_SCHEDULE_MONTHLY_HOUR", "2"))  # 2 AM
 BACKUP_RETENTION_COUNT = int(os.getenv("BACKUP_RETENTION_COUNT", "10"))
 
 # Image archival configuration
