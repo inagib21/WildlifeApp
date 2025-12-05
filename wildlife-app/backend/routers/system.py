@@ -1,22 +1,29 @@
 """System health and status endpoints"""
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 from slowapi import Limiter
 from typing import Dict, Any, Optional
+from sqlalchemy.orm import Session
 import asyncio
 import os
 import psutil
 import time
 from datetime import datetime, timedelta
 from collections import deque
+from fastapi.responses import JSONResponse
+from sqlalchemy import func, text
 
 try:
     from ..services.motioneye import motioneye_client
     from ..services.speciesnet import speciesnet_processor
     from ..utils.caching import get_cached, set_cached
+    from ..database import Detection, Camera
+    from ..services.notifications import notification_service
 except ImportError:
     from services.motioneye import motioneye_client
     from services.speciesnet import speciesnet_processor
     from utils.caching import get_cached, set_cached
+    from database import Detection, Camera
+    from services.notifications import notification_service
 
 # Global storage for network/disk I/O metrics (simple in-memory tracking)
 _network_io_history = deque(maxlen=60)  # Store last 60 measurements (1 minute at 1/sec)
@@ -26,8 +33,8 @@ _last_io_measurement = None
 router = APIRouter()
 
 
-def setup_system_router(limiter: Limiter) -> APIRouter:
-    """Setup system router with rate limiting"""
+def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
+    """Setup system router with rate limiting and dependencies"""
     
     @router.get("/system")
     @limiter.limit("60/minute")  # Rate limit: 60 requests per minute (frequently polled)
@@ -102,15 +109,15 @@ def setup_system_router(limiter: Limiter) -> APIRouter:
             cameras_count = 0
             speciesnet_status = "unknown"
             
-            # Run MotionEye and SpeciesNet checks concurrently with very short timeouts
+            # Run MotionEye and SpeciesNet checks concurrently with reasonable timeouts
             # Use asyncio.to_thread for better cancellation support (Python 3.9+)
             try:
-                # Create tasks with very short individual timeouts
+                # Create tasks with reasonable timeouts
                 motioneye_task = asyncio.create_task(
                     asyncio.wait_for(
                         asyncio.to_thread(motioneye_client.get_cameras) if hasattr(asyncio, 'to_thread')
                         else asyncio.get_event_loop().run_in_executor(None, motioneye_client.get_cameras),
-                        timeout=0.8  # Very short timeout - don't block
+                        timeout=3.0  # Reasonable timeout for MotionEye
                     )
                 )
                 
@@ -118,7 +125,7 @@ def setup_system_router(limiter: Limiter) -> APIRouter:
                     asyncio.wait_for(
                         asyncio.to_thread(speciesnet_processor.get_status) if hasattr(asyncio, 'to_thread')
                         else asyncio.get_event_loop().run_in_executor(None, speciesnet_processor.get_status),
-                        timeout=0.8  # Very short timeout - don't block
+                        timeout=5.0  # Longer timeout for SpeciesNet (model loading can take time)
                     )
                 )
             except AttributeError:
@@ -127,21 +134,21 @@ def setup_system_router(limiter: Limiter) -> APIRouter:
                 motioneye_task = asyncio.create_task(
                     asyncio.wait_for(
                         loop.run_in_executor(None, motioneye_client.get_cameras),
-                        timeout=0.8
+                        timeout=3.0  # Reasonable timeout for MotionEye
                     )
                 )
                 speciesnet_task = asyncio.create_task(
                     asyncio.wait_for(
                         loop.run_in_executor(None, speciesnet_processor.get_status),
-                        timeout=0.8
+                        timeout=5.0  # Longer timeout for SpeciesNet (model loading can take time)
                     )
                 )
             
-            # Wait for both with a very short overall timeout
+            # Wait for both with reasonable overall timeout
             try:
                 motioneye_result, speciesnet_result = await asyncio.wait_for(
                     asyncio.gather(motioneye_task, speciesnet_task, return_exceptions=True),
-                    timeout=1.0  # Total timeout for both checks - very short
+                    timeout=6.0  # Total timeout for both checks - allow enough time
                 )
                 
                 # Process MotionEye result
@@ -243,6 +250,187 @@ def setup_system_router(limiter: Limiter) -> APIRouter:
     async def get_system_health_api(request: Request) -> Dict[str, Any]:
         """Alias for /system to support frontend API calls"""
         return await get_system_health(request)
+    
+    @router.get("/")
+    def read_root():
+        """Root endpoint"""
+        return {"message": "Wildlife Monitoring API with SpeciesNet Integration"}
+    
+    @router.get("/health")
+    async def health_check(request: Request):
+        """
+        Basic health check endpoint for monitoring tools
+        
+        Returns 200 if system is healthy, 503 if unhealthy
+        """
+        # Quick health check - return immediately, check services in background
+        # This prevents the health endpoint from blocking
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "message": "Backend is running"
+        }
+    
+    @router.get("/api/health")
+    @limiter.limit("120/minute")
+    async def health_check_api(request: Request):
+        """Alias for /health endpoint"""
+        return await health_check(request)
+    
+    @router.get("/health/detailed")
+    @limiter.limit("60/minute")
+    async def detailed_health_check(request: Request, db: Session = Depends(get_db)):
+        """
+        Detailed health check with metrics for monitoring tools
+        
+        Returns comprehensive system status including:
+        - Database connectivity and query performance
+        - MotionEye service status
+        - SpeciesNet service status
+        - System resources (CPU, memory, disk)
+        - Recent error counts
+        """
+        try:
+            from ..database import Detection, Camera
+        except ImportError:
+            from database import Detection, Camera
+        
+        import logging
+        
+        try:
+            
+            # Database checks
+            db_start = time.time()
+            try:
+                db.execute(text("SELECT 1"))
+                db_query_time = (time.time() - db_start) * 1000  # milliseconds
+                db_status = "healthy"
+                db_error = None
+            except Exception as e:
+                db_status = "unhealthy"
+                db_query_time = None
+                db_error = str(e)
+            
+            # Get database stats
+            try:
+                detection_count = db.query(func.count(Detection.id)).scalar()
+                camera_count = db.query(func.count(Camera.id)).scalar()
+            except Exception:
+                detection_count = None
+                camera_count = None
+            
+            # MotionEye check with timeout (increased to 30s to handle slow responses)
+            motioneye_start = time.time()
+            motioneye_healthy = False
+            motioneye_response_time = None
+            motioneye_error = None
+            try:
+                loop = asyncio.get_event_loop()
+                motioneye_status = await asyncio.wait_for(
+                    loop.run_in_executor(None, motioneye_client.get_status),
+                    timeout=30.0  # Increased from 3s to 30s to handle slow MotionEye responses
+                )
+                motioneye_response_time = (time.time() - motioneye_start) * 1000
+                motioneye_healthy = motioneye_status == "running"
+            except asyncio.TimeoutError:
+                motioneye_response_time = None
+                motioneye_error = "timeout"
+            except Exception as e:
+                motioneye_response_time = None
+                motioneye_error = str(e)
+            
+            # SpeciesNet check with timeout (increased to 40s to handle slow responses)
+            speciesnet_start = time.time()
+            speciesnet_healthy = False
+            speciesnet_response_time = None
+            speciesnet_error = None
+            try:
+                loop = asyncio.get_event_loop()
+                speciesnet_status = await asyncio.wait_for(
+                    loop.run_in_executor(None, speciesnet_processor.get_status),
+                    timeout=40.0  # Increased from 5s to 40s to handle slow SpeciesNet responses
+                )
+                speciesnet_response_time = (time.time() - speciesnet_start) * 1000
+                speciesnet_healthy = speciesnet_status == "running"
+            except asyncio.TimeoutError:
+                speciesnet_response_time = None
+                speciesnet_error = "timeout"
+            except Exception as e:
+                speciesnet_response_time = None
+                speciesnet_error = str(e)
+            
+            # System resources
+            try:
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                memory = psutil.virtual_memory()
+                disk = psutil.disk_usage('/')
+            except Exception as e:
+                cpu_percent = None
+                memory = None
+                disk = None
+            
+            # Overall health
+            overall_healthy = db_status == "healthy"
+            status_code = 200 if overall_healthy else 503
+            
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "status": "healthy" if overall_healthy else "degraded",
+                    "timestamp": datetime.now().isoformat(),
+                    "dependencies": {
+                        "database": {
+                            "status": db_status,
+                            "required": True,
+                            "query_time_ms": db_query_time,
+                            "error": db_error,
+                            "stats": {
+                                "detections": detection_count,
+                                "cameras": camera_count
+                            }
+                        },
+                        "motioneye": {
+                            "status": "healthy" if motioneye_healthy else "unhealthy",
+                            "required": False,
+                            "response_time_ms": motioneye_response_time,
+                            "error": motioneye_error
+                        },
+                        "speciesnet": {
+                            "status": "healthy" if speciesnet_healthy else "unhealthy",
+                            "required": False,
+                            "response_time_ms": speciesnet_response_time,
+                            "error": speciesnet_error
+                        }
+                    },
+                    "system": {
+                        "cpu_percent": cpu_percent,
+                        "memory": {
+                            "total_gb": round(memory.total / (1024**3), 2) if memory else None,
+                            "used_gb": round(memory.used / (1024**3), 2) if memory else None,
+                            "available_gb": round(memory.available / (1024**3), 2) if memory else None,
+                            "percent": memory.percent if memory else None
+                        } if memory else None,
+                        "disk": {
+                            "total_gb": round(disk.total / (1024**3), 2) if disk else None,
+                            "used_gb": round(disk.used / (1024**3), 2) if disk else None,
+                            "free_gb": round(disk.free / (1024**3), 2) if disk else None,
+                            "percent": disk.percent if disk else None
+                        } if disk else None
+                    },
+                    "uptime_seconds": None  # Can be set by app state if needed
+                }
+            )
+        except Exception as e:
+            logger.error(f"Detailed health check failed: {e}", exc_info=True)
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "error",
+                    "error": str(e),
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
     
     return router
 
