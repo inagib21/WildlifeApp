@@ -51,22 +51,48 @@ export function useRealtime(url: string, options: RealtimeOptions = {}) {
       }
 
       eventSource.onerror = (event) => {
-        setIsConnected(false)
-        setError('Connection error')
-        onError?.(event)
-
-        // Attempt to reconnect
-        if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-          reconnectAttemptsRef.current++
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connect()
-          }, reconnectInterval)
+        const target = event.target as EventSource
+        const readyState = target?.readyState
+        
+        // EventSource.onerror fires in different states:
+        // - CONNECTING (0): Initial connection attempt or reconnection attempt
+        // - OPEN (1): Connection established (errors here are rare)
+        // - CLOSED (2): Connection was closed
+        
+        if (readyState === EventSource.CLOSED) {
+          // Connection was closed - this is a real error
+          setIsConnected(false)
+          setError('Connection closed')
+          
+          // Attempt to reconnect
+          if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+            reconnectAttemptsRef.current++
+            reconnectTimeoutRef.current = setTimeout(() => {
+              connect()
+            }, reconnectInterval)
+          }
+        } else if (readyState === EventSource.CONNECTING) {
+          // Still trying to connect - this is normal during initial connection or reconnection
+          // Don't log as error, just wait for connection to establish or fail
+          // The connection will either succeed (onopen) or fail and close (then we'll reconnect)
+          setIsConnected(false)
+          setError(null) // Clear any previous error while connecting
+        } else if (readyState === EventSource.OPEN) {
+          // Connection is open but error occurred - this is unusual
+          // Don't disconnect immediately, let it try to recover
+          console.warn('EventSource error while connection is open')
         }
-      }
-
-      eventSource.onclose = () => {
-        setIsConnected(false)
-        onClose?.()
+        
+        // Only call onError callback for actual errors (not CONNECTING state)
+        if (readyState !== EventSource.CONNECTING) {
+          onError?.(event)
+        }
+        
+        // Handle connection close
+        if (readyState === EventSource.CLOSED) {
+          setIsConnected(false)
+          onClose?.()
+        }
       }
     } catch (err) {
       setError('Failed to create connection')
@@ -115,10 +141,23 @@ export function useDetectionsRealtime(onNewDetection?: (detection: any) => void)
       } else if (data.id && data.species !== undefined) {
         // Direct detection object format
         onNewDetection?.(data)
+      } else if (data.type === 'keepalive') {
+        // Ignore keepalive messages
+        return
       }
     },
     onError: (error) => {
-      console.error('Detections SSE error:', error)
+      // EventSource error events don't have much info, log what we can
+      const target = error.target as EventSource
+      const readyState = target?.readyState
+      
+      // Only log actual errors (not CONNECTING state which is normal)
+      if (readyState === EventSource.CLOSED) {
+        console.warn('Detections SSE connection closed, will attempt to reconnect...')
+      } else if (readyState === EventSource.OPEN) {
+        console.warn('Detections SSE error while connected')
+      }
+      // Don't log CONNECTING state - it's normal during connection attempts
     },
     reconnectInterval: 3000, // Faster reconnection for detections
     maxReconnectAttempts: 10 // More attempts for critical real-time data
@@ -131,12 +170,31 @@ export function useSystemRealtime(onSystemUpdate?: (systemData: any) => void) {
   
   return useRealtime(`${API_URL}/events/system`, {
     onMessage: (data) => {
-      if (data.type === 'system') {
-        onSystemUpdate?.(data.data)
+      // Handle different event formats
+      if (data.type === 'system' || data.type === 'system_update') {
+        onSystemUpdate?.(data.data || data)
+      } else if (data.type === 'keepalive') {
+        // Ignore keepalive messages
+        return
+      } else if (data.system || data.motioneye || data.speciesnet) {
+        // Direct system health data format
+        onSystemUpdate?.(data)
       }
     },
     onError: (error) => {
-      console.error('System SSE error:', error)
-    }
+      // EventSource error events don't have much info, log what we can
+      const target = error.target as EventSource
+      const readyState = target?.readyState
+      
+      // Only log actual errors (not CONNECTING state which is normal)
+      if (readyState === EventSource.CLOSED) {
+        console.warn('System SSE connection closed, will attempt to reconnect...')
+      } else if (readyState === EventSource.OPEN) {
+        console.warn('System SSE error while connected')
+      }
+      // Don't log CONNECTING state - it's normal during connection attempts
+    },
+    reconnectInterval: 5000, // Reconnect every 5 seconds
+    maxReconnectAttempts: 10 // More attempts for system updates
   })
 } 

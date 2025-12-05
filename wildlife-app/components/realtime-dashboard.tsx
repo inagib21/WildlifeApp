@@ -82,6 +82,8 @@ export function RealtimeDashboard() {
     setTotalUniqueSpecies(prev => {
       if (!prev) return 1
       // Check if this is a new species by looking at existing detections
+      // Note: This uses the detections state from the closure, which may be slightly stale
+      // but is acceptable for this approximate count
       const existingSpecies = new Set((detections || []).map(d => d.species).filter(Boolean))
       if (!existingSpecies.has(newDetection.species) && newDetection.species && newDetection.species !== 'Unknown') {
         return prev + 1
@@ -99,11 +101,11 @@ export function RealtimeDashboard() {
     setLastUpdate(new Date())
   })
 
-  // Fetch each KPI independently
+  // Fetch each KPI independently with caching for faster page loads
   useEffect(() => {
-    getCameras().then(setCameras).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
-    getDetections({ limit: 50 }).then(setDetections).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
-    getSystemHealth().then(setSystemHealth).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
+    getCameras(true).then(setCameras).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
+    getDetections({ limit: 50 }, true).then(setDetections).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
+    getSystemHealth(true).then(setSystemHealth).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
     getDetectionsCount().then(setTotalDetectionsCount).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
     getUniqueSpeciesCountFast(30).then(setTotalUniqueSpecies).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
     // Fetch large dataset in chunks (non-blocking)

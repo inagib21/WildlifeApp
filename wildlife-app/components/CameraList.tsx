@@ -27,7 +27,8 @@ const CameraList: React.FC = () => {
 
   const fetchCameras = useCallback(async () => {
     try {
-      const data = await getCameras();
+      // Use cache for faster page navigation
+      const data = await getCameras(true);
       setCameras(data);
     } catch (error) {
       console.error('Error fetching cameras:', error);
@@ -48,12 +49,12 @@ const CameraList: React.FC = () => {
   }, [fetchCameras]);
 
   useEffect(() => {
-    // Sync cameras from MotionEye on initial load
-    handleSyncCameras();
+    // Fetch cameras on initial load (don't auto-sync - let user trigger sync manually)
+    fetchCameras();
     // Refresh camera list every 30 seconds
     const interval = setInterval(fetchCameras, 30000);
     return () => clearInterval(interval);
-  }, [handleSyncCameras, fetchCameras]);
+  }, [fetchCameras]);
 
   const handleCameraSelect = (camera: Camera) => {
     setSelectedCamera(camera);

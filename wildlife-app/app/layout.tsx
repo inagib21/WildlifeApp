@@ -3,11 +3,12 @@ import { Inter } from "next/font/google"
 import "./globals.css"
 import { Toaster } from "sonner"
 import { ThemeProvider } from "@/components/theme-provider"
-import { SidebarProvider } from "@/components/ui/sidebar"
+import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar"
 import { NavMain } from "@/components/nav-main"
 import { NavSecondary } from "@/components/nav-secondary"
 import { NavUser } from "@/components/nav-user"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { KeyboardShortcutsProvider } from "@/components/keyboard-shortcuts-provider"
 
 const inter = Inter({ subsets: ["latin"] })
 
@@ -32,7 +33,8 @@ export default function RootLayout({
           disableTransitionOnChange
           storageKey="wildlife-theme"
         >
-          <SidebarProvider>
+          <KeyboardShortcutsProvider>
+            <SidebarProvider>
             <div className="flex min-h-screen">
               <div className="hidden md:block w-64 border-r bg-background">
                 <div className="flex h-full flex-col gap-2 p-4">
@@ -68,6 +70,7 @@ export default function RootLayout({
             </div>
             <Toaster />
           </SidebarProvider>
+          </KeyboardShortcutsProvider>
         </ThemeProvider>
       </body>
     </html>

@@ -88,12 +88,24 @@ async def parse_motioneye_payload(request: Request) -> Dict[str, Any]:
         if chunk:
             data.update(chunk)
 
-    camera_id = _coerce_int(
-        _first_present(data, "camera_id", "camera", "id", "cameraid")
-    )
+    # Extract file_path first (needed for camera_id extraction fallback)
     file_path = _first_present(
         data, "file_path", "file", "path", "filename", "full_path"
     )
+    
+    # Extract camera_id from payload
+    camera_id = _coerce_int(
+        _first_present(data, "camera_id", "camera", "id", "cameraid")
+    )
+    
+    # If camera_id not found in payload, try to extract from file_path
+    # MotionEye sometimes sends paths like /var/lib/motioneye/Camera8/...
+    if camera_id is None and file_path:
+        import re
+        # Try to extract camera number from path (Camera8, Camera1, etc.)
+        match = re.search(r'/Camera(\d+)/', file_path)
+        if match:
+            camera_id = _coerce_int(match.group(1))
     event_type = _first_present(data, "type", "event", "event_type", "action") or "unknown"
     timestamp = _first_present(data, "timestamp", "time", "when", "ts")
 

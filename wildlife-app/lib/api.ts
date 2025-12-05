@@ -4,6 +4,42 @@ import { apiCache } from './api-cache'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
 
+export async function getNotificationStatus(): Promise<{ enabled: boolean }> {
+  try {
+    const response = await axios.get(`${API_URL}/api/notifications/status`, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error fetching notification status:', error)
+    return { enabled: false }
+  }
+}
+
+export async function toggleNotifications(): Promise<{ enabled: boolean; message: string }> {
+  try {
+    const response = await axios.post(`${API_URL}/api/notifications/toggle`, {}, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error toggling notifications:', error)
+    throw error
+  }
+}
+
+export async function setNotificationEnabled(enabled: boolean): Promise<{ enabled: boolean; message: string }> {
+  try {
+    const response = await axios.put(`${API_URL}/api/notifications/enabled?enabled=${enabled}`, {}, {
+      timeout: 5000
+    })
+    return response.data
+  } catch (error: any) {
+    console.error('Error setting notification state:', error)
+    throw error
+  }
+}
+
 export const getCameras = async (useCache: boolean = true) => {
   // Check cache first (5 second TTL for fast page navigation)
   const cacheKey = 'cameras'
@@ -640,12 +676,23 @@ export async function getSpeciesAnalytics(
     if (cameraId) params.append('camera_id', cameraId.toString())
     
     const response = await axios.get(`${API_URL}/api/analytics/species?${params.toString()}`, {
-      timeout: 10000
+      timeout: 60000 // Increased timeout to 60s for large datasets
     })
     return response.data
   } catch (error: any) {
     console.error('Error fetching species analytics:', error)
-    throw new Error(error.response?.data?.detail || 'Failed to fetch species analytics')
+    
+    // Provide more helpful error messages
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      console.error('Request timed out. The backend may be slow processing large datasets.')
+    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
+      console.error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+    } else if (error.response) {
+      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+      console.error(`Error details: ${error.response.data?.detail || 'Unknown error'}`)
+    }
+    
+    throw new Error(error.response?.data?.detail || error.message || 'Failed to fetch species analytics')
   }
 }
 
@@ -663,12 +710,23 @@ export async function getTimelineAnalytics(
     params.append('interval', interval)
     
     const response = await axios.get(`${API_URL}/api/analytics/timeline?${params.toString()}`, {
-      timeout: 10000
+      timeout: 60000 // Increased timeout to 60s for large datasets
     })
     return response.data
   } catch (error: any) {
     console.error('Error fetching timeline analytics:', error)
-    throw new Error(error.response?.data?.detail || 'Failed to fetch timeline analytics')
+    
+    // Provide more helpful error messages
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      console.error('Request timed out. The backend may be slow processing large datasets.')
+    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
+      console.error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+    } else if (error.response) {
+      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+      console.error(`Error details: ${error.response.data?.detail || 'Unknown error'}`)
+    }
+    
+    throw new Error(error.response?.data?.detail || error.message || 'Failed to fetch timeline analytics')
   }
 }
 
@@ -682,12 +740,23 @@ export async function getCameraAnalytics(
     if (endDate) params.append('end_date', endDate)
     
     const response = await axios.get(`${API_URL}/api/analytics/cameras?${params.toString()}`, {
-      timeout: 10000
+      timeout: 60000 // Increased timeout to 60s for large datasets
     })
     return response.data
   } catch (error: any) {
     console.error('Error fetching camera analytics:', error)
-    throw new Error(error.response?.data?.detail || 'Failed to fetch camera analytics')
+    
+    // Provide more helpful error messages
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      console.error('Request timed out. The backend may be slow processing large datasets.')
+    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
+      console.error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+    } else if (error.response) {
+      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+      console.error(`Error details: ${error.response.data?.detail || 'Unknown error'}`)
+    }
+    
+    throw new Error(error.response?.data?.detail || error.message || 'Failed to fetch camera analytics')
   }
 }
 

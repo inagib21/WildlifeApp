@@ -7,6 +7,7 @@ import asyncio
 import os
 import psutil
 import time
+import logging
 from datetime import datetime, timedelta
 from collections import deque
 from fastapi.responses import JSONResponse
@@ -31,6 +32,7 @@ _disk_io_history = deque(maxlen=60)
 _last_io_measurement = None
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def setup_system_router(limiter: Limiter, get_db) -> APIRouter:

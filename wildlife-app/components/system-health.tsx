@@ -55,7 +55,8 @@ export function SystemHealth() {
         setLoading(true)
         setError(null)
         
-        const data = await getSystemHealth()
+        // Use cache for faster page navigation
+        const data = await getSystemHealth(true)
         
         // Map the API response to the expected SystemHealth interface
         const mappedHealth: SystemHealth = {
@@ -212,13 +213,19 @@ export function SystemHealth() {
               <div className="flex items-center justify-between">
                 <p className="font-medium">MotionEye</p>
                 <p className={`text-sm ${getStatusColor(health?.motioneye?.status || 'unknown')}`}>
-                  {health?.motioneye?.status === "running" ? "Running" : health?.motioneye?.status || "Unknown"}
+                  {health?.motioneye?.status === "running" ? "Running" : 
+                   health?.motioneye?.status === "timeout" ? "Timeout" :
+                   health?.motioneye?.status === "error" ? "Error" :
+                   health?.motioneye?.status || "Unknown"}
                 </p>
               </div>
               <div className="flex items-center justify-between">
                 <p className="font-medium">SpeciesNet</p>
                 <p className={`text-sm ${getStatusColor(health?.speciesnet?.status || 'unknown')}`}>
-                  {health?.speciesnet?.status === "running" ? "Running" : health?.speciesnet?.status || "Unknown"}
+                  {health?.speciesnet?.status === "running" ? "Running" :
+                   health?.speciesnet?.status === "timeout" ? "Timeout" :
+                   health?.speciesnet?.status === "error" ? "Error" :
+                   health?.speciesnet?.status || "Unknown"}
                 </p>
               </div>
               <div className="flex items-center justify-between">

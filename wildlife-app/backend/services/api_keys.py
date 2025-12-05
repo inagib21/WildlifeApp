@@ -93,7 +93,7 @@ class ApiKeyService:
             expires_at=expires_at,
             rate_limit_per_minute=rate_limit_per_minute,
             allowed_ips=",".join(allowed_ips) if allowed_ips else None,
-            metadata=str(metadata) if metadata else None
+            extra_metadata=str(metadata) if metadata else None
         )
         
         db.add(api_key_record)

@@ -1,0 +1,54 @@
+warning: in the working copy of 'scripts/control.bat', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/app/globals.css', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/app/layout.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/backend/main.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/backend/requirements.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/backend/speciesnet_server.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/components/detections-list.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/components/nav-main.tsx', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/motioneye_config/camera-1.conf', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/motioneye_config/camera-2.conf', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/motioneye_config/camera-3.conf', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/motioneye_config/camera-4.conf', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/motioneye_config/camera-5.conf', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/motioneye_config/camera-6.conf', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/motioneye_config/camera-8.conf', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'wildlife-app/package.json', LF will be replaced by CRLF the next time Git touches it
+ scripts/README.md                                  |   66 [32m+[m[31m-[m
+ scripts/control.bat                                |  732 [32m++[m[31m----------[m
+ scripts/restart-all.bat                            |  153 [31m---[m
+ scripts/stop-wildlife-app.bat                      |   52 [31m-[m
+ scripts/wildlife-app-control.bat                   |  278 [31m-----[m
+ wildlife-app/app/globals.css                       |   36 [32m+[m[31m-[m
+ wildlife-app/app/layout.tsx                        |    7 [32m+[m[31m-[m
+ .../backend/__pycache__/main.cpython-311.pyc       |  Bin [31m127297[m -> [32m223153[m bytes
+ .../backend/__pycache__/main.cpython-313.pyc       |  Bin [31m169418[m -> [32m199128[m bytes
+ .../__pycache__/speciesnet_server.cpython-311.pyc  |  Bin [31m7195[m -> [32m26298[m bytes
+ wildlife-app/backend/config.py                     |    9 [32m+[m[31m-[m
+ wildlife-app/backend/database.py                   |   30 [32m+[m[31m-[m
+ wildlife-app/backend/main.py                       | 1250 [32m+++++++++++++++[m[31m-----[m
+ wildlife-app/backend/models.py                     |   49 [32m+[m
+ wildlife-app/backend/requirements.txt              |    6 [32m+[m
+ wildlife-app/backend/routers/system.py             |   16 [32m+[m[31m-[m
+ wildlife-app/backend/services/api_keys.py          |    2 [32m+[m[31m-[m
+ wildlife-app/backend/services/motioneye.py         |   17 [32m+[m[31m-[m
+ wildlife-app/backend/services/notifications.py     |  156 [32m++[m[31m-[m
+ wildlife-app/backend/services/scheduler.py         |  152 [32m+++[m
+ wildlife-app/backend/services/speciesnet.py        |    5 [32m+[m[31m-[m
+ wildlife-app/backend/speciesnet_server.py          |  397 [32m++++++[m[31m-[m
+ wildlife-app/components/detections-chart.tsx       |   65 [32m+[m[31m-[m
+ wildlife-app/components/detections-list.tsx        |  124 [32m+[m[31m-[m
+ wildlife-app/components/nav-main.tsx               |    5 [32m+[m
+ wildlife-app/components/system-health.tsx          |   10 [32m+[m[31m-[m
+ wildlife-app/hooks/use-realtime.ts                 |   87 [32m+[m[31m-[m
+ wildlife-app/lib/api.ts                            |   33 [32m+[m[31m-[m
+ wildlife-app/motioneye_config/camera-1.conf        |   24 [32m+[m[31m-[m
+ wildlife-app/motioneye_config/camera-2.conf        |   18 [32m+[m[31m-[m
+ wildlife-app/motioneye_config/camera-3.conf        |   18 [32m+[m[31m-[m
+ wildlife-app/motioneye_config/camera-4.conf        |   24 [32m+[m[31m-[m
+ wildlife-app/motioneye_config/camera-5.conf        |   22 [32m+[m[31m-[m
+ wildlife-app/motioneye_config/camera-6.conf        |    4 [32m+[m[31m-[m
+ wildlife-app/motioneye_config/camera-8.conf        |   16 [32m+[m[31m-[m
+ wildlife-app/package.json                          |   14 [32m+[m[31m-[m
+ wildlife-app/scripts/add-cameras.ts                |    2 [32m+[m[31m-[m
+ 37 files changed, 2295 insertions(+), 1584 deletions(-)

@@ -7,11 +7,15 @@ import logging
 try:
     from ..services.events import get_event_manager
     from ..services.photo_scanner import PhotoScanner
-    from ..utils.audit import log_audit_event
+    from ..utils.audit import log_audit_event, get_audit_logs
+    from ..database import AuditLog
+    from datetime import datetime, timedelta
 except ImportError:
     from services.events import get_event_manager
     from services.photo_scanner import PhotoScanner
-    from utils.audit import log_audit_event
+    from utils.audit import log_audit_event, get_audit_logs
+    from database import AuditLog
+    from datetime import datetime, timedelta
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -103,10 +107,9 @@ def setup_debug_router(get_db) -> APIRouter:
             raise HTTPException(status_code=500, detail=f"Photo scan failed: {str(e)}")
 
     @router.get("/api/photo-scan-status")
-    async def get_photo_scan_status(get_db_func=Depends(get_db)):
+    async def get_photo_scan_status(db: Session = Depends(get_db)):
         """Get status of photo scanner and statistics"""
         try:
-            db = next(get_db_func())
             scanner = PhotoScanner(db, event_manager=event_manager)
             
             # Load current processed files
@@ -145,8 +148,89 @@ def setup_debug_router(get_db) -> APIRouter:
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to get scan status: {str(e)}")
-        finally:
-            db.close()
+
+    @router.get("/api/debug/error-statistics")
+    def get_error_statistics(db: Session = Depends(get_db), hours: int = 24):
+        """Get error statistics from audit logs"""
+        try:
+            import json
+            
+            # Get time range
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(hours=hours)
+            
+            # Query error logs
+            error_logs = db.query(AuditLog).filter(
+                AuditLog.timestamp >= start_time,
+                AuditLog.timestamp <= end_time,
+                AuditLog.success == False
+            ).all()
+            
+            # Categorize errors
+            error_categories = {}
+            error_types = {}
+            error_by_action = {}
+            recent_errors = []
+            
+            for log in error_logs:
+                # Parse details if available
+                details = {}
+                if log.details:
+                    try:
+                        details = json.loads(log.details) if isinstance(log.details, str) else log.details
+                    except:
+                        pass
+                
+                # Count by category
+                category = details.get("error_category", "unknown")
+                error_categories[category] = error_categories.get(category, 0) + 1
+                
+                # Count by error type
+                error_type = details.get("error_type", log.error_message or "unknown")
+                error_types[error_type] = error_types.get(error_type, 0) + 1
+                
+                # Count by action
+                action = log.action
+                error_by_action[action] = error_by_action.get(action, 0) + 1
+                
+                # Collect recent errors
+                recent_errors.append({
+                    "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                    "action": action,
+                    "error_type": error_type,
+                    "error_category": category,
+                    "error_message": log.error_message,
+                    "resource_type": log.resource_type,
+                    "resource_id": log.resource_id,
+                    "suggestion": details.get("suggestion", "Check logs for details")
+                })
+            
+            # Sort recent errors by timestamp (newest first)
+            recent_errors.sort(key=lambda x: x["timestamp"] or "", reverse=True)
+            
+            # Get webhook-specific errors
+            webhook_errors = [e for e in recent_errors if "WEBHOOK" in e["action"]]
+            
+            return {
+                "time_range_hours": hours,
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "total_errors": len(error_logs),
+                "error_categories": dict(sorted(error_categories.items(), key=lambda x: x[1], reverse=True)),
+                "error_types": dict(sorted(error_types.items(), key=lambda x: x[1], reverse=True)),
+                "error_by_action": dict(sorted(error_by_action.items(), key=lambda x: x[1], reverse=True)),
+                "webhook_errors": {
+                    "total": len(webhook_errors),
+                    "recent": webhook_errors[:10]  # Last 10 webhook errors
+                },
+                "recent_errors": recent_errors[:20],  # Last 20 errors overall
+                "most_common_category": max(error_categories.items(), key=lambda x: x[1])[0] if error_categories else None,
+                "most_common_type": max(error_types.items(), key=lambda x: x[1])[0] if error_types else None
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get error statistics: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to get error statistics: {str(e)}")
 
     return router
 

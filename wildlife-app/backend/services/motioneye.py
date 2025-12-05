@@ -26,18 +26,19 @@ class MotionEyeClient:
     def get_cameras(self) -> List[Dict[str, Any]]:
         """Get list of cameras from MotionEye"""
         try:
-            response = self.session.get(f"{self.base_url}/config/list", timeout=(1, 1))
+            # Increased timeout to handle slow responses (10s connect, 15s read)
+            response = self.session.get(f"{self.base_url}/config/list", timeout=(10, 15))
             if response.status_code == 200:
                 data = response.json()
                 return data.get("cameras", [])
             return []
         except requests.exceptions.Timeout:
-            # MotionEye not responding - log at debug level, not error
-            logging.debug(f"MotionEye timeout (may not be running): {self.base_url}")
+            # MotionEye not responding - log at warning level
+            logging.warning(f"MotionEye timeout (may be slow or not responding): {self.base_url}")
             return []
         except requests.exceptions.ConnectionError:
-            # MotionEye not accessible - log at debug level
-            logging.debug(f"MotionEye connection error (may not be running): {self.base_url}")
+            # MotionEye not accessible - log at warning level
+            logging.warning(f"MotionEye connection error (may not be running): {self.base_url}")
             return []
         except Exception as e:
             # Only log actual errors at error level
@@ -82,7 +83,8 @@ class MotionEyeClient:
     def get_camera_config(self, camera_id: int) -> Optional[Dict[str, Any]]:
         """Get full camera configuration from MotionEye"""
         try:
-            response = self.session.get(f"{self.base_url}/config/{camera_id}/get", timeout=(2, 2))
+            # Increased timeout for config retrieval (10s connect, 15s read)
+            response = self.session.get(f"{self.base_url}/config/{camera_id}/get", timeout=(10, 15))
             if response.status_code == 200:
                 return response.json()
             return None
@@ -101,12 +103,28 @@ class MotionEyeClient:
             # Update with motion settings
             current_config.update(motion_settings)
             
-            # Send updated config
-            response = self.session.post(f"{self.base_url}/config/{camera_id}/set", json=current_config, timeout=(2, 2))
+            # Send updated config with increased timeout (10s connect, 15s read)
+            response = self.session.post(f"{self.base_url}/config/{camera_id}/set", json=current_config, timeout=(10, 15))
             return response.status_code == 200
         except Exception as e:
             logging.error(f"Error setting motion settings in MotionEye: {e}")
             return False
+    
+    def get_status(self) -> str:
+        """Get MotionEye server status"""
+        try:
+            # Increased timeout for status check (10s connect, 15s read)
+            response = self.session.get(f"{self.base_url}/config/list", timeout=(10, 15))
+            if response.status_code == 200:
+                return "running"
+            else:
+                return "error"
+        except requests.exceptions.Timeout:
+            return "timeout"
+        except requests.exceptions.ConnectionError:
+            return "not_available"
+        except Exception:
+            return "error"
 
 
 # Global MotionEye client instance

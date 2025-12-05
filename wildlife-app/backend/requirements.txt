@@ -41,5 +41,11 @@ APScheduler>=3.10.0
 bcrypt>=4.0.0
 python-jose[cryptography]>=3.3.0
 
+# SMS notifications
+twilio>=8.10.0
+
+# PDF generation
+reportlab>=4.0.0
+
 # Optional: For better async database performance
 # asyncpg>=0.29.0  # Uncomment if you want to use asyncpg instead of psycopg2

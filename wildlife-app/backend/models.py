@@ -214,3 +214,52 @@ class AuditLogResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+class WebhookBase(BaseModel):
+    """Base webhook model"""
+    name: str = Field(..., min_length=1, max_length=200, description="Webhook name")
+    url: str = Field(..., min_length=1, max_length=500, description="Webhook URL")
+    event_type: str = Field(..., description="Event type: detection, system_alert, or all")
+    is_active: bool = Field(True, description="Whether webhook is active")
+    secret: Optional[str] = Field(None, max_length=200, description="Optional secret for signing")
+    headers: Optional[str] = Field(None, description="JSON string for custom headers")
+    retry_count: int = Field(3, ge=0, le=10, description="Number of retry attempts")
+    retry_delay: int = Field(5, ge=1, le=60, description="Delay between retries in seconds")
+    timeout: int = Field(10, ge=1, le=60, description="Request timeout in seconds")
+    description: Optional[str] = Field(None, max_length=1000, description="Optional description")
+    filters: Optional[str] = Field(None, description="JSON string for event filters")
+    
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v):
+        """Validate webhook URL"""
+        if not v or not v.strip():
+            raise ValueError('Webhook URL cannot be empty')
+        v = v.strip()
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError('Webhook URL must start with http:// or https://')
+        return v
+    
+    @field_validator('event_type')
+    @classmethod
+    def validate_event_type(cls, v):
+        """Validate event type"""
+        valid_types = ['detection', 'system_alert', 'all']
+        if v not in valid_types:
+            raise ValueError(f'Event type must be one of: {", ".join(valid_types)}')
+        return v
+
+
+class WebhookCreate(WebhookBase):
+    pass
+
+
+class WebhookResponse(WebhookBase):
+    id: int
+    created_at: datetime
+    last_triggered_at: Optional[datetime] = None
+    success_count: int
+    failure_count: int
+    
+    class Config:
+        from_attributes = True

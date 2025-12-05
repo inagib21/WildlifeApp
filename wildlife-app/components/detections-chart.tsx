@@ -9,16 +9,27 @@ export function DetectionsChart() {
   const [range, setRange] = useState<'week' | 'month' | 'all'>('week')
   const [chartData, setChartData] = useState<Array<{species: string, count: number}>>([])
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchSpeciesCounts = async () => {
       setLoading(true)
+      setError(null)
       try {
         const data = await getSpeciesCounts(range)
         setChartData(data)
-      } catch (error) {
+      } catch (error: any) {
         console.error('Error fetching species counts:', error)
         setChartData([])
+        
+        // Set error message for connection errors
+        if (error?.code === 'ECONNREFUSED' || error?.message?.includes('Network Error') || error?.message?.includes('ERR_NETWORK')) {
+          setError('Backend server is not responding. Please ensure the backend is running on port 8001.')
+        } else if (error?.code === 'ECONNABORTED' || error?.message?.includes('timeout')) {
+          setError('Request timed out. The backend may be slow or unresponsive.')
+        } else {
+          setError('Failed to load species counts. Please try again.')
+        }
       } finally {
         setLoading(false)
       }
@@ -26,6 +37,58 @@ export function DetectionsChart() {
 
     fetchSpeciesCounts()
   }, [range])
+
+  // If error, show error message with retry button
+  if (error && !loading) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Species Detections</CardTitle>
+          <CardDescription>Most common species detected by cameras</CardDescription>
+          <div className="mt-2 flex gap-2">
+            <button onClick={() => setRange('week')} className={`px-2 py-1 rounded ${range === 'week' ? 'bg-blue-500 text-white' : 'bg-muted'}`}>Past Week</button>
+            <button onClick={() => setRange('month')} className={`px-2 py-1 rounded ${range === 'month' ? 'bg-blue-500 text-white' : 'bg-muted'}`}>Past Month</button>
+            <button onClick={() => setRange('all')} className={`px-2 py-1 rounded ${range === 'all' ? 'bg-blue-500 text-white' : 'bg-muted'}`}>All Time</button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-col items-center justify-center h-64 gap-3">
+            <p className="text-red-500 font-medium">⚠️ Backend Server Not Available</p>
+            <p className="text-sm text-muted-foreground text-center max-w-md">{error}</p>
+            <button 
+              onClick={() => {
+                setError(null)
+                setLoading(true)
+                const fetchSpeciesCounts = async () => {
+                  try {
+                    const data = await getSpeciesCounts(range)
+                    setChartData(data)
+                    setError(null)
+                  } catch (err: any) {
+                    setChartData([])
+                    if (err?.code === 'ECONNREFUSED' || err?.message?.includes('Network Error')) {
+                      setError('Backend server is not responding. Please ensure the backend is running on port 8001.')
+                    } else {
+                      setError('Failed to load species counts. Please try again.')
+                    }
+                  } finally {
+                    setLoading(false)
+                  }
+                }
+                fetchSpeciesCounts()
+              }}
+              className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+            >
+              Retry Connection
+            </button>
+            <p className="text-xs text-muted-foreground text-center max-w-md">
+              Make sure the backend is running: <code className="bg-muted px-1 rounded">scripts\control.bat</code> → Start All Services
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
 
   // If no detections, show placeholder
   if (chartData.length === 0 && !loading) {

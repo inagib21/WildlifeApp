@@ -34,7 +34,7 @@ const cameras = [
 async function addCameras() {
   for (const camera of cameras) {
     try {
-      await axios.post('http://localhost:8000/cameras', camera);
+      await axios.post('http://localhost:8001/api/cameras', camera);
       console.log(`Added camera: ${camera.camera_name}`);
     } catch (error: any) {
       console.error(`Failed to add camera ${camera.camera_name}:`, error.response?.data?.detail || error.message);

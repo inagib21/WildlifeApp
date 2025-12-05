@@ -2,11 +2,13 @@
 
 import * as React from "react"
 import { Detection } from "@/types/api"
-import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions, deleteDetection, bulkDeleteDetections, DetectionFilters } from "@/lib/api"
+import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions, deleteDetection, bulkDeleteDetections, DetectionFilters, getCameras } from "@/lib/api"
+import { Camera } from "@/types/api"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import Image from "next/image"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose } from "@/components/ui/dialog"
 import { toast } from "sonner"
@@ -63,10 +65,22 @@ export function DetectionsList() {
   const [sortDir, setSortDir] = React.useState<'asc' | 'desc'>('desc')
   const [selectedDetection, setSelectedDetection] = React.useState<Detection | null>(null)
   const [searchQuery, setSearchQuery] = React.useState("")
+  const [activeSearchQuery, setActiveSearchQuery] = React.useState("") // The query actually used for searching
   const [exporting, setExporting] = React.useState(false)
   const [selectedDetections, setSelectedDetections] = React.useState<Set<number>>(new Set())
   const [deleting, setDeleting] = React.useState(false)
   const [backendConnected, setBackendConnected] = React.useState<boolean | null>(null)
+  const [cameras, setCameras] = React.useState<Camera[]>([])
+  const [selectedCameraId, setSelectedCameraId] = React.useState<number | undefined>(undefined)
+
+  // Handle search on Enter key press
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      setActiveSearchQuery(searchQuery) // Trigger search when Enter is pressed
+      setPage(0) // Reset to first page when searching
+    }
+  }
 
   // Check backend connection status
   React.useEffect(() => {
@@ -94,12 +108,13 @@ export function DetectionsList() {
     const fetchPage = async () => {
       try {
         const offset = page * PAGE_SIZE
-        // Use cache only for first page without search (faster navigation)
-        const useCache = page === 0 && !searchQuery
+        // Use cache only for first page without search or camera filter (faster navigation)
+        const useCache = page === 0 && !activeSearchQuery && !selectedCameraId
         const filters: DetectionFilters = {
           limit: PAGE_SIZE,
           offset: offset,
-          search: searchQuery || undefined
+          search: activeSearchQuery || undefined,
+          cameraId: selectedCameraId
         }
         const data = await getDetections(filters, useCache)
         setDetections(data)
@@ -130,7 +145,7 @@ export function DetectionsList() {
       }
     }
     fetchPage()
-  }, [page, searchQuery])
+  }, [page, activeSearchQuery, selectedCameraId])
 
   // Subscribe to real-time detection updates via SSE using the hook
   const { isConnected: sseConnected, error: sseError } = useDetectionsRealtime((newDetection) => {
@@ -139,9 +154,9 @@ export function DetectionsList() {
       // Add the new detection to the list if we're on the first page and it matches search
       if (page === 0) {
         // Check if detection matches search query
-        const matchesSearch = !searchQuery || 
-          newDetection.species?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          newDetection.camera_name?.toLowerCase().includes(searchQuery.toLowerCase())
+        const matchesSearch = !activeSearchQuery || 
+          newDetection.species?.toLowerCase().includes(activeSearchQuery.toLowerCase()) ||
+          newDetection.camera_name?.toLowerCase().includes(activeSearchQuery.toLowerCase())
         
         if (matchesSearch) {
           setDetections((prev) => {
@@ -248,7 +263,7 @@ export function DetectionsList() {
       const filters: DetectionFilters = {
         limit: PAGE_SIZE,
         offset: offset,
-        search: searchQuery || undefined
+        search: activeSearchQuery || undefined
       }
       const data = await getDetections(filters, false)
       setDetections(data)
@@ -280,7 +295,7 @@ export function DetectionsList() {
       const filters: DetectionFilters = {
         limit: PAGE_SIZE,
         offset: offset,
-        search: searchQuery || undefined
+        search: activeSearchQuery || undefined
       }
       const data = await getDetections(filters, false)
       setDetections(data)
@@ -371,14 +386,34 @@ export function DetectionsList() {
       
       {/* Search and Export Controls */}
       <div className="flex items-center gap-4">
-        <div className="flex-1">
+        <div className="flex-1 flex items-center gap-2">
           <Input
             type="text"
-            placeholder="Search detections (species, camera, path)..."
+            placeholder="Search detections (species, camera, path)... Press Enter to search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
             className="max-w-md"
           />
+          <Select
+            value={selectedCameraId?.toString() || "all"}
+            onValueChange={(value) => {
+              setSelectedCameraId(value === "all" ? undefined : parseInt(value))
+              setPage(0) // Reset to first page when filtering
+            }}
+          >
+            <SelectTrigger className="w-[200px]">
+              <SelectValue placeholder="Filter by camera" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Cameras</SelectItem>
+              {cameras.map((camera) => (
+                <SelectItem key={camera.id} value={camera.id.toString()}>
+                  {camera.name || `Camera ${camera.id}`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div className="flex gap-2">
           {selectedDetections.size > 0 && (

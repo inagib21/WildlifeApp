@@ -17,6 +17,13 @@ class SpeciesNetProcessor:
         self.confidence_threshold = 0.5
         self.server_url = SPECIESNET_URL
         self.session = requests.Session()
+        # Import smart detection processor
+        try:
+            from .smart_detection import SmartDetectionProcessor
+            self.smart_processor = SmartDetectionProcessor()
+        except ImportError:
+            from smart_detection import SmartDetectionProcessor
+            self.smart_processor = SmartDetectionProcessor()
         # Configure connection pooling with NO retries
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=10,
@@ -36,7 +43,7 @@ class SpeciesNetProcessor:
                 response = self.session.post(
                     f"{self.server_url}/predict",
                     files=files,
-                    timeout=(10, 30)  # 10s connect, 30s read (SpeciesNet needs more time)
+                    timeout=(15, 60)  # 15s connect, 60s read (SpeciesNet model inference can take time)
                 )
                 if response.status_code == 200:
                     return response.json()
@@ -53,7 +60,9 @@ class SpeciesNetProcessor:
     def get_status(self) -> str:
         """Get SpeciesNet server status"""
         try:
-            response = self.session.get(f"{self.server_url}/health", timeout=(5, 5))
+            # Increased timeout for SpeciesNet health check (model loading can take time)
+            # 15s connect, 20s read to handle slow startup
+            response = self.session.get(f"{self.server_url}/health", timeout=(15, 20))
             if response.status_code == 200:
                 return "running"
             else:

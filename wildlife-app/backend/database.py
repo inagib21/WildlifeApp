@@ -25,6 +25,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+def get_db():
+    """Database session dependency for FastAPI"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 # Database Models
 class Camera(Base):
     __tablename__ = "cameras"
