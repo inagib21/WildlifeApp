@@ -418,29 +418,39 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
         db: Session = Depends(get_db)
     ):
         """Get species counts for different time ranges"""
-        # Base query
-        query = db.query(Detection.species, func.count(Detection.id).label('count'))
-        
-        # Apply time filter
-        if range == "week":
-            week_ago = datetime.now() - timedelta(days=7)
-            query = query.filter(Detection.timestamp >= week_ago)
-        elif range == "month":
-            month_ago = datetime.now() - timedelta(days=30)
-            query = query.filter(Detection.timestamp >= month_ago)
-        
-        # Group by species and get counts
-        results = query.group_by(Detection.species).order_by(func.count(Detection.id).desc()).limit(10).all()
-        
-        # Format results
-        species_counts = []
-        for species, count in results:
-            species_counts.append({
-                "species": species or "Unknown",
-                "count": count
-            })
-        
-        return species_counts
+        try:
+            # Base query
+            query = db.query(Detection.species, func.count(Detection.id).label('count'))
+            
+            # Apply time filter
+            if range == "week":
+                week_ago = datetime.now() - timedelta(days=7)
+                query = query.filter(Detection.timestamp >= week_ago)
+            elif range == "month":
+                month_ago = datetime.now() - timedelta(days=30)
+                query = query.filter(Detection.timestamp >= month_ago)
+            elif range != "all":
+                # Invalid range parameter
+                raise HTTPException(status_code=400, detail=f"Invalid range parameter: {range}. Must be 'week', 'month', or 'all'")
+            
+            # Group by species and get counts
+            results = query.group_by(Detection.species).order_by(func.count(Detection.id).desc()).limit(10).all()
+            
+            # Format results
+            species_counts = []
+            for species, count in results:
+                species_counts.append({
+                    "species": species or "Unknown",
+                    "count": int(count)  # Ensure count is an integer
+                })
+            
+            logging.debug(f"Species counts query returned {len(species_counts)} results for range: {range}")
+            return species_counts
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error(f"Error fetching species counts: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to fetch species counts: {str(e)}")
 
     @router.get("/detections/unique-species-count")
     def get_unique_species_count(

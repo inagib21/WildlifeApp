@@ -172,11 +172,25 @@ class PhotoScanner:
                 "detections_json": str(speciesnet_response),
                 "file_hash": file_hash
             }
-            db_detection = Detection(**detection_data)
-            self.db.add(db_detection)
-            self.db.commit()
-            self.db.refresh(db_detection)
-            self.processed_hashes.add(file_hash)
+            
+            try:
+                db_detection = Detection(**detection_data)
+                self.db.add(db_detection)
+                self.db.flush()  # Flush to get the ID without committing yet
+                logger.info(f"[PhotoScanner] ✅ Detection created in database (ID: {db_detection.id}, Camera: {camera_id}, Species: {species}, Confidence: {confidence:.2f})")
+                
+                # Commit the detection
+                self.db.commit()
+                logger.info(f"[PhotoScanner] ✅ Detection committed to database (ID: {db_detection.id})")
+                
+                # Refresh to ensure we have the latest data
+                self.db.refresh(db_detection)
+                self.processed_hashes.add(file_hash)
+                logger.info(f"[PhotoScanner] ✅ Detection refreshed from database (ID: {db_detection.id})")
+            except Exception as commit_error:
+                self.db.rollback()
+                logger.error(f"[PhotoScanner] ❌ Failed to save detection to database: {commit_error}", exc_info=True)
+                raise  # Re-raise to be handled by outer exception handler
             
             # Broadcast detection if event_manager is available
             if self.event_manager:
@@ -212,10 +226,15 @@ class PhotoScanner:
                             loop.create_task(self.event_manager.broadcast_detection(detection_event))
                         else:
                             asyncio.run(self.event_manager.broadcast_detection(detection_event))
+                        logger.info(f"[PhotoScanner] ✅ Detection broadcast to clients (ID: {db_detection.id})")
                     except RuntimeError:
                         asyncio.run(self.event_manager.broadcast_detection(detection_event))
+                        logger.info(f"[PhotoScanner] ✅ Detection broadcast to clients (ID: {db_detection.id})")
+                    except Exception as broadcast_error:
+                        logger.warning(f"[PhotoScanner] ⚠️ Failed to broadcast detection (ID: {db_detection.id}): {broadcast_error}")
+                        # Don't fail processing if broadcast fails - detection is already saved
                 except Exception as e:
-                    logger.error(f"Error broadcasting detection from PhotoScanner: {e}")
+                    logger.error(f"[PhotoScanner] Error broadcasting detection: {e}", exc_info=True)
             
             if species.lower() != "unknown":
                 logger.info(f"Processed and archived photo: {photo_info['filename']} -> {detection_data['species']} ({detection_data['confidence']:.2f})")

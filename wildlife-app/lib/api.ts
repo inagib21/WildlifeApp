@@ -530,13 +530,37 @@ export async function getSpeciesCounts(range: 'week' | 'month' | 'all' = 'all'):
     const response = await axios.get(url, {
       timeout: 60000 // 60 second timeout
     })
-    return response.data
+    
+    // Validate response data format
+    if (!Array.isArray(response.data)) {
+      console.warn('Invalid response format from species-counts endpoint, expected array')
+      return []
+    }
+    
+    // Ensure all items have the correct format
+    return response.data.map((item: any) => ({
+      species: item.species || 'Unknown',
+      count: typeof item.count === 'number' ? item.count : parseInt(item.count) || 0
+    }))
   } catch (error: any) {
     if (isBackendOffline(error)) {
       console.warn('Backend is offline - returning empty species counts')
       return []
     }
-    console.error('Error fetching species counts:', error)
+    
+    // Log more detailed error information
+    if (error.response) {
+      console.error('Error fetching species counts - Response:', {
+        status: error.response.status,
+        statusText: error.response.statusText,
+        data: error.response.data
+      })
+    } else if (error.request) {
+      console.error('Error fetching species counts - No response received:', error.message)
+    } else {
+      console.error('Error fetching species counts:', error.message || error)
+    }
+    
     return []
   }
 }

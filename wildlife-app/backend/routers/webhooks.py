@@ -132,10 +132,23 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                     }
                 
                 # Create detection record
-                db_detection = Detection(**detection_data)
-                db.add(db_detection)
-                db.commit()
-                db.refresh(db_detection)
+                try:
+                    db_detection = Detection(**detection_data)
+                    db.add(db_detection)
+                    db.flush()  # Flush to get the ID without committing yet
+                    logger.info(f"[Thingino] ✅ Detection created in database (ID: {db_detection.id}, Camera: {camera_id}, Species: {detection_data['species']}, Confidence: {detection_data['confidence']:.2f})")
+                    
+                    # Commit the detection
+                    db.commit()
+                    logger.info(f"[Thingino] ✅ Detection committed to database (ID: {db_detection.id})")
+                    
+                    # Refresh to ensure we have the latest data
+                    db.refresh(db_detection)
+                    logger.info(f"[Thingino] ✅ Detection refreshed from database (ID: {db_detection.id})")
+                except Exception as commit_error:
+                    db.rollback()
+                    logger.error(f"[Thingino] ❌ Failed to save detection to database: {commit_error}", exc_info=True)
+                    raise  # Re-raise to be handled by outer exception handler
                 
                 # Log webhook detection
                 log_audit_event(
@@ -171,28 +184,30 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                     except Exception as e:
                         logging.warning(f"Failed to send notification: {e}")
                 
-                print(f"Detection saved: ID={db_detection.id}, Species={detection_data['species']}, Confidence={detection_data['confidence']}")
+                logger.info(f"[Thingino] Detection saved: ID={db_detection.id}, Species={detection_data['species']}, Confidence={detection_data['confidence']:.2f}")
                 
                 # Broadcast the new detection to connected clients
                 detection_event = {
-                    "type": "detection",
-                    "detection": {
-                        "id": db_detection.id,
-                        "camera_id": camera_id,
-                        "camera_name": camera_name,
-                        "species": detection_data["species"],
-                        "confidence": detection_data["confidence"],
-                        "image_path": temp_path,
-                        "timestamp": db_detection.timestamp.isoformat(),
-                        "media_url": f"/api/thingino/image/{db_detection.id}"
-                    }
+                    "id": db_detection.id,
+                    "camera_id": camera_id,
+                    "camera_name": camera_name,
+                    "species": detection_data["species"],
+                    "confidence": detection_data["confidence"],
+                    "image_path": temp_path,
+                    "timestamp": db_detection.timestamp.isoformat(),
+                    "media_url": f"/api/thingino/image/{db_detection.id}"
                 }
                 # Use asyncio to call the async broadcast
                 try:
                     loop = asyncio.get_event_loop()
-                    loop.create_task(event_manager.broadcast_detection(detection_event))
-                except RuntimeError:
-                    asyncio.run(event_manager.broadcast_detection(detection_event))
+                    if loop.is_running():
+                        loop.create_task(event_manager.broadcast_detection(detection_event))
+                    else:
+                        asyncio.run(event_manager.broadcast_detection(detection_event))
+                    logger.info(f"[Thingino] ✅ Detection broadcast to clients (ID: {db_detection.id})")
+                except Exception as broadcast_error:
+                    logger.warning(f"[Thingino] ⚠️ Failed to broadcast detection (ID: {db_detection.id}): {broadcast_error}")
+                    # Don't fail the webhook if broadcast fails - detection is already saved
                 
             except Exception as e:
                 import traceback
@@ -473,18 +488,30 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                 timestamp=detection_timestamp
             )
             
-            if "error" in analysis or not smart_processor.should_save_detection(analysis):
-                logger.warning("Smart detection analysis: %s (confidence: %.2f, quality: %s)", 
-                             analysis.get("error", "Low confidence"), 
-                             analysis.get("confidence", 0.0),
-                             analysis.get("quality", "unknown"))
-                # Still save the detection if it meets minimum threshold, but mark quality
+            # Check if detection should be saved
+            should_save = smart_processor.should_save_detection(analysis)
+            
+            if "error" in analysis:
+                logger.warning("Smart detection analysis error: %s", analysis.get("error", "Unknown error"))
+                # Still save the detection even on error, but with error info
                 detection_data = smart_processor.get_detection_data(
                     analysis=analysis,
                     image_path=local_file_path,
                     camera_id=camera_id,
                     timestamp=detection_timestamp
                 )
+            elif not should_save:
+                logger.info("Skipping detection save: confidence too low or quality check failed (confidence: %.2f, species: %s)", 
+                           analysis.get("confidence", 0.0),
+                           analysis.get("species", "Unknown"))
+                # Don't save this detection - return early
+                return {
+                    "status": "skipped",
+                    "message": "Detection not saved (low confidence or quality check failed)",
+                    "reason": "should_not_save",
+                    "confidence": analysis.get("confidence", 0.0),
+                    "species": analysis.get("species", "Unknown")
+                }
             else:
                 # Use smart detection results
                 detection_data = smart_processor.get_detection_data(
@@ -501,10 +528,26 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                            analysis.get("confidence_gap", 0.0))
             
             # Create detection record
-            db_detection = Detection(**detection_data)
-            db.add(db_detection)
-            db.commit()
-            db.refresh(db_detection)
+            try:
+                db_detection = Detection(**detection_data)
+                db.add(db_detection)
+                db.flush()  # Flush to get the ID without committing yet
+                logger.info(f"✅ Detection created in database (ID: {db_detection.id}, Camera: {camera_id}, Species: {detection_data['species']}, Confidence: {detection_data['confidence']:.2f})")
+                
+                # Commit the detection
+                db.commit()
+                logger.info(f"✅ Detection committed to database (ID: {db_detection.id})")
+                
+                # Refresh to ensure we have the latest data
+                db.refresh(db_detection)
+                logger.info(f"✅ Detection refreshed from database (ID: {db_detection.id})")
+            except Exception as commit_error:
+                db.rollback()
+                logger.error(f"❌ Failed to save detection to database: {commit_error}", exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to save detection to database: {str(commit_error)}"
+                )
             
             # Send notification if high confidence (using smart detection analysis)
             if not "error" in analysis and analysis.get("should_notify", False):
@@ -571,7 +614,13 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                 "timestamp": db_detection.timestamp.isoformat(),
                 "media_url": f"/media/{extracted_camera_name}/{file_date}/{os.path.basename(local_file_path)}"
             }
-            await event_manager.broadcast_detection(detection_event)
+            
+            try:
+                await event_manager.broadcast_detection(detection_event)
+                logger.info(f"✅ Detection broadcast to clients (ID: {db_detection.id})")
+            except Exception as broadcast_error:
+                logger.warning(f"⚠️ Failed to broadcast detection (ID: {db_detection.id}): {broadcast_error}")
+                # Don't fail the webhook if broadcast fails - detection is already saved
             
             return {
                 "status": "success",

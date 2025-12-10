@@ -58,6 +58,13 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
+# Basic health check - must be before routers so it works even if routers fail
+@app.get("/health")
+def health_check():
+    """Basic health check endpoint - works even if database is down"""
+    return {"status": "healthy", "service": "wildlife-backend"}
+
+
 # Rate limiting middleware - protect against API abuse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
