@@ -29,14 +29,17 @@ const CameraList: React.FC = () => {
     try {
       // Use cache for faster page navigation
       const data = await getCameras(true);
-      setCameras(data);
+      setCameras(data || []);
     } catch (error: any) {
       console.error('Error fetching cameras:', error);
-      // Show user-friendly error message
-      const errorMessage = error.message || 'Failed to fetch cameras. Please ensure the backend server is running on port 8001.';
-      toast.error(errorMessage, {
-        duration: 5000,
-      });
+      // Only show error if it's not a connection error (getCameras returns [] for offline)
+      if (!error.message?.includes('Cannot connect') && !error.message?.includes('Network Error')) {
+        const errorMessage = error.message || 'Failed to fetch cameras.';
+        toast.error(errorMessage, {
+          duration: 5000,
+        });
+      }
+      setCameras([]);
     }
   }, []);
 

@@ -103,20 +103,37 @@ export function RealtimeDashboard() {
 
   // Fetch each KPI independently with caching for faster page loads
   useEffect(() => {
-    getCameras(true).then(setCameras).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
-    getDetections({ limit: 50 }, true).then(setDetections).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
-    getSystemHealth(true).then(setSystemHealth).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
-    getDetectionsCount().then(setTotalDetectionsCount).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
-    getUniqueSpeciesCountFast(30).then(setTotalUniqueSpecies).catch(e => setError(e instanceof Error ? e : new Error(String(e))))
-    // Fetch large dataset in chunks (non-blocking)
+    getCameras(true).then(setCameras).catch(() => setCameras([]))
+    getDetections({ limit: 50 }, true).then(setDetections).catch(() => setDetections([]))
+    getSystemHealth(true).then(setSystemHealth).catch(() => {
+      setSystemHealth({
+        status: 'offline',
+        cameras: 0,
+        detections: 0,
+        motioneye_status: 'offline',
+        speciesnet_status: 'offline',
+        system: {
+          cpu_percent: 0,
+          memory_percent: 0,
+          disk_percent: 0,
+          timestamp: new Date().toISOString()
+        }
+      })
+    })
+    getDetectionsCount().then(setTotalDetectionsCount).catch(() => setTotalDetectionsCount(0))
+    getUniqueSpeciesCountFast(30).then(setTotalUniqueSpecies).catch(() => setTotalUniqueSpecies(0))
+    // Fetch large dataset in chunks (non-blocking, reduced limit to prevent timeouts)
     setTimeout(async () => {
       try {
-        const allDetectionsData = await getDetectionsChunked(undefined, 2000)
+        // Reduced from 2000 to 500 to prevent timeouts with many detections
+        const allDetectionsData = await getDetectionsChunked(undefined, 500)
         setAllDetections(allDetectionsData)
       } catch (e) {
         console.error('Error loading large dataset:', e)
+        // Don't fail silently - use empty array as fallback
+        setAllDetections([])
       }
-    }, 1000)
+    }, 2000) // Increased delay to let other requests complete first
     setLastUpdate(new Date())
   }, [])
 

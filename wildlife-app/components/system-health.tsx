@@ -89,7 +89,11 @@ export function SystemHealth() {
         setLastUpdate(new Date())
       } catch (err) {
         console.error('Error fetching system health:', err)
-        setError(err instanceof Error ? err.message : 'Failed to fetch system health')
+        // Don't set error for offline backend - it's handled gracefully
+        const errorMessage = err instanceof Error ? err.message : 'Failed to fetch system health'
+        if (!errorMessage.includes('Cannot connect') && !errorMessage.includes('Network Error')) {
+          setError(errorMessage)
+        }
         // Set default health data to prevent complete failure
         setHealth({
           system: {

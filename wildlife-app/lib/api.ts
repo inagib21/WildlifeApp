@@ -5,6 +5,18 @@ import { ApiDebugger } from './api-debug'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
 
+// Helper function to check if error indicates backend is offline
+function isBackendOffline(error: any): boolean {
+  return (
+    error.code === 'ECONNREFUSED' ||
+    error.code === 'ECONNABORTED' ||
+    error.message?.includes('Network Error') ||
+    error.message?.includes('ERR_CONNECTION_REFUSED') ||
+    error.message?.includes('ERR_NETWORK') ||
+    (error.response === undefined && error.request !== undefined)
+  )
+}
+
 export async function getNotificationStatus(): Promise<{ enabled: boolean }> {
   try {
     const response = await axios.get(`${API_URL}/api/notifications/status`, {
@@ -65,17 +77,13 @@ export const getCameras = async (useCache: boolean = true) => {
     return response.data
   } catch (error: any) {
     ApiDebugger.logError(error, 'getCameras')
-    // Provide more helpful error messages
-    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-      const timeoutError = new Error('Request timed out. Please check if the backend server is running.')
-      console.error(timeoutError.message)
-      throw timeoutError
-    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_CONNECTION_REFUSED')) {
-      const connectionError = new Error(`Cannot connect to backend server at ${API_URL}. Please ensure the backend is running on port 8001.`)
-      console.error(connectionError.message)
-      console.error(`Attempted URL: ${API_URL}/cameras`)
-      throw connectionError
-    } else if (error.response) {
+    // If backend is offline, return empty array instead of throwing
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning empty cameras array')
+      return []
+    }
+    // For other errors, still throw
+    if (error.response) {
       const httpError = new Error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
       console.error(httpError.message)
       throw httpError
@@ -181,17 +189,16 @@ export async function getDetections(filters?: DetectionFilters, useCache: boolea
     
     return response.data
   } catch (error: any) {
+    // If backend is offline, return empty array gracefully
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning empty detections array')
+      return []
+    }
+    
     console.error('Error fetching detections:', error)
     
-    // Provide helpful error messages
-    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-      console.error('Request timed out. The backend may be slow or unresponsive.')
-    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_NETWORK')) {
-      console.error('❌ Cannot connect to backend server!')
-      console.error(`   Backend URL: ${API_URL}/detections`)
-      console.error('   Please ensure the backend is running on port 8001')
-      console.error('   Start it with: npm run backend:venv or use scripts\\start-system.bat')
-    } else if (error.response) {
+    // Provide helpful error messages for other errors
+    if (error.response) {
       console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
     } else {
       console.error('Unknown error:', error.message || error)
@@ -298,7 +305,25 @@ export async function getSystemHealth(useCache: boolean = true) {
     }
     return result
   } catch (error: any) {
-    // Handle timeout gracefully - don't retry, just return default values
+    // If backend is offline, return offline status
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning offline status')
+      return {
+        status: 'offline',
+        cameras: 0,
+        detections: 0,
+        motioneye_status: 'offline',
+        speciesnet_status: 'offline',
+        system: {
+          cpu_percent: 0,
+          memory_percent: 0,
+          disk_percent: 0,
+          timestamp: new Date().toISOString()
+        }
+      }
+    }
+    
+    // Handle timeout gracefully
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
       console.warn('System health check timeout - returning default values')
       return {
@@ -488,7 +513,11 @@ export async function getDetectionsCount(cameraId?: number): Promise<number> {
       timeout: 60000 // 60 second timeout
     })
     return response.data.count
-  } catch (error) {
+  } catch (error: any) {
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning 0 for detections count')
+      return 0
+    }
     console.error('Error fetching detections count:', error)
     return 0
   }
@@ -503,19 +532,11 @@ export async function getSpeciesCounts(range: 'week' | 'month' | 'all' = 'all'):
     })
     return response.data
   } catch (error: any) {
-    console.error('Error fetching species counts:', error)
-    
-    // Provide helpful error messages
-    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-      console.error('Request timed out. The backend may be slow or unresponsive.')
-    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_NETWORK')) {
-      console.error('❌ Cannot connect to backend server!')
-      console.error(`   Backend URL: ${API_URL}/detections/species-counts`)
-      console.error('   Please ensure the backend is running on port 8001')
-    } else if (error.response) {
-      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning empty species counts')
+      return []
     }
-    
+    console.error('Error fetching species counts:', error)
     return []
   }
 }
@@ -526,7 +547,11 @@ export async function getUniqueSpeciesCount(): Promise<number> {
       timeout: 60000 // 60 second timeout
     })
     return response.data.count
-  } catch (error) {
+  } catch (error: any) {
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning 0 for unique species count')
+      return 0
+    }
     console.error('Error fetching unique species count:', error)
     return 0
   }
@@ -537,7 +562,11 @@ export async function getDetectionsTimeseries(interval: 'hour' | 'day' = 'hour',
     const url = `${API_URL}/analytics/detections/timeseries?interval=${interval}&days=${days}`
     const response = await axios.get(url, { timeout: 30000 })
     return response.data
-  } catch (error) {
+  } catch (error: any) {
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning empty timeseries')
+      return []
+    }
     console.error('Error fetching detections timeseries:', error)
     return []
   }
@@ -548,7 +577,11 @@ export async function getTopSpecies(limit: number = 5, days: number = 30): Promi
     const url = `${API_URL}/analytics/detections/top_species?limit=${limit}&days=${days}`
     const response = await axios.get(url, { timeout: 30000 })
     return response.data
-  } catch (error) {
+  } catch (error: any) {
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning empty top species')
+      return []
+    }
     console.error('Error fetching top species:', error)
     return []
   }
@@ -559,7 +592,11 @@ export async function getUniqueSpeciesCountFast(days: number = 30): Promise<numb
     const url = `${API_URL}/analytics/detections/unique_species_count?days=${days}`
     const response = await axios.get(url, { timeout: 30000 })
     return response.data.unique_species
-  } catch (error) {
+  } catch (error: any) {
+    if (isBackendOffline(error)) {
+      console.warn('Backend is offline - returning 0 for unique species count (fast)')
+      return 0
+    }
     console.error('Error fetching unique species count (fast):', error)
     return 0
   }

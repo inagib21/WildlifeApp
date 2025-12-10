@@ -44,222 +44,226 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         search: Optional[str] = None,
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        request: Request = None
     ):
         """Get detections with optional filtering and pagination"""
-        try:
-            # Skip the expensive count query - it's not needed for the response
-            # Only log if in debug mode to avoid performance impact
-            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                total_count = db.query(Detection).count()
-                logging.debug(f"Total detections in database: {total_count}")
-            
-            query = db.query(Detection)
-            
-            if camera_id is not None:
-                query = query.filter(Detection.camera_id == camera_id)
-            
-            if species is not None:
-                query = query.filter(Detection.species.ilike(f"%{species}%"))
-            
-            if start_date:
-                try:
-                    start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                    query = query.filter(Detection.timestamp >= start_dt)
-                except ValueError:
-                    pass  # Invalid date format, ignore
-            
-            if end_date:
-                try:
-                    end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                    query = query.filter(Detection.timestamp <= end_dt)
-                except ValueError:
-                    pass  # Invalid date format, ignore
-            
-            # Apply search filter if provided (searches species, image_path, and camera name)
-            if search:
-                search_term = f"%{search}%"
-                # Join with Camera table to search camera names
-                query = query.join(Camera, Detection.camera_id == Camera.id).filter(
-                    or_(
-                        Detection.species.ilike(search_term),
-                        Detection.image_path.ilike(search_term),
-                        Camera.name.ilike(search_term)
-                    )
-                )
-            else:
-                # No join needed if not searching
-                pass
-            
-            # Apply ordering first
-            query = query.order_by(Detection.timestamp.desc())
-            
-            # Apply offset if provided
-            if offset is not None:
-                query = query.offset(offset)
-            
-            # Apply limit if provided, otherwise default to 50
-            if limit is not None:
-                query = query.limit(limit)
-            else:
-                query = query.limit(50)
-            
-            detections = query.all()
-            logging.info(f"Query returned {len(detections)} detections from database")
+        from utils.error_handler import ErrorContext, handle_database_error
+        from sqlalchemy.exc import SQLAlchemyError
         
-            # Batch-fetch all cameras to avoid N+1 queries
-            camera_ids = {d.camera_id for d in detections if d.camera_id is not None}
-            cameras = {}
-            if camera_ids:
-                cameras = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(camera_ids)).all()}
-        
-            # Convert to response models with media URLs
-            result = []
-            for detection in detections:
-                try:
-                    camera = cameras.get(detection.camera_id) if detection.camera_id else None
-                    # Ensure camera_name is always a non-empty string (required by DetectionResponse)
-                    if camera and camera.name and str(camera.name).strip():
-                        camera_name = str(camera.name).strip()
-                    elif detection.camera_id:
-                        camera_name = f"Camera {detection.camera_id}"
-                    else:
-                        camera_name = "Unknown Camera"
-                    
-                    # Extract full taxonomy from detections_json if available
-                    full_taxonomy = None
-                    if detection.detections_json:
-                        try:
-                            detections_data = json.loads(detection.detections_json)
-                            if "predictions" in detections_data and detections_data["predictions"]:
-                                full_taxonomy = detections_data["predictions"][0].get("prediction", detection.species)
-                            elif "species" in detections_data:
-                                full_taxonomy = detections_data["species"]
-                        except:
-                            full_taxonomy = detection.species or "Unknown"
-                    
-                    # Ensure all required fields have valid values for DetectionResponse
-                    # DetectionBase requires: camera_id >= 1, species (non-empty), confidence (0.0-1.0), image_path (non-empty with valid extension)
-                    camera_id_val = int(detection.camera_id) if detection.camera_id and detection.camera_id >= 1 else 1
-                    species_val = str(detection.species).strip() if detection.species and str(detection.species).strip() else "Unknown"
-                    confidence_val = float(detection.confidence) if detection.confidence is not None else 0.0
-                    confidence_val = max(0.0, min(1.0, confidence_val))  # Clamp to 0.0-1.0
-                    
-                    # Normalize image_path to ensure it passes validation
-                    # The validator requires either a valid image extension or a temp path
-                    if detection.image_path and str(detection.image_path).strip():
-                        image_path_val = str(detection.image_path).strip()
-                        # Check if it has a valid extension
-                        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
-                        has_valid_ext = any(image_path_val.lower().endswith(ext) for ext in valid_extensions)
-                        # Check if it's a temp path
-                        is_temp_path = image_path_val.startswith('/tmp') or image_path_val.startswith('C:\\') or 'temp' in image_path_val.lower()
-                        # If neither, add .jpg extension to make it valid
-                        if not has_valid_ext and not is_temp_path:
-                            image_path_val = image_path_val + '.jpg'
-                    else:
-                        # Default to a valid temp path
-                        image_path_val = "/tmp/unknown.jpg"
-                    
-                    # Fix detections_json - it might be stored as Python dict string instead of JSON
-                    # The validator requires it to be valid JSON or None
-                    detections_json_val = None
-                    if detection.detections_json:
-                        try:
-                            # Try to parse as JSON first
-                            json.loads(detection.detections_json)
-                            detections_json_val = detection.detections_json  # Already valid JSON
-                        except (json.JSONDecodeError, TypeError):
-                            # If it's a Python dict string, convert it to JSON
-                            try:
-                                if isinstance(detection.detections_json, str):
-                                    # Try to eval it as Python literal (dict)
-                                    parsed = ast.literal_eval(detection.detections_json)
-                                    detections_json_val = json.dumps(parsed)  # Convert to JSON string
-                                    # Verify the converted JSON is valid
-                                    json.loads(detections_json_val)
-                                else:
-                                    detections_json_val = json.dumps(detection.detections_json)
-                                    # Verify the converted JSON is valid
-                                    json.loads(detections_json_val)
-                            except Exception as e:
-                                # If all else fails, set to None (invalid JSON will fail validation)
-                                logging.warning(f"Could not convert detections_json for detection {detection.id} to valid JSON: {e}")
-                                detections_json_val = None
-                    
-                    detection_dict = {
-                        "id": detection.id,
-                        "camera_id": camera_id_val,
-                        "timestamp": detection.timestamp,
-                        "species": species_val,
-                        "full_taxonomy": full_taxonomy,
-                        "confidence": confidence_val,
-                        "image_path": image_path_val,
-                        "file_size": detection.file_size,
-                        "image_width": detection.image_width,
-                        "image_height": detection.image_height,
-                        "image_quality": detection.image_quality,
-                        "prediction_score": float(detection.prediction_score) if detection.prediction_score is not None else None,
-                        "detections_json": detections_json_val,
-                        "media_url": None,  # Will be set below
-                        "camera_name": str(camera_name)  # Add camera name to response
-                    }
-            
-                    # Generate media URL from image path
-                    if detection.image_path:
-                        try:
-                            # Normalize path for both Windows and Linux
-                            path = detection.image_path.replace("\\", "/")
-                            parts = path.split("/")
-                            # Look for motioneye_media/CameraX/date/filename or archived_photos/common_name/camera/date/filename
-                            if "motioneye_media" in parts:
-                                idx = parts.index("motioneye_media")
-                                if len(parts) > idx + 3:
-                                    camera_folder = parts[idx + 1]  # Camera1
-                                    date_folder = parts[idx + 2]    # 2025-07-15
-                                    filename = parts[idx + 3]       # 11-00-07.jpg
-                                    detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
-                            elif "archived_photos" in parts:
-                                idx = parts.index("archived_photos")
-                                if len(parts) > idx + 4:
-                                    # archived_photos/common_name/camera/date/filename
-                                    species_name = parts[idx + 1]    # human, vehicle, etc.
-                                    camera_folder = parts[idx + 2]   # 1, 2, etc.
-                                    date_folder = parts[idx + 3]    # 2025-08-11
-                                    filename = parts[idx + 4]        # 13-08-44.jpg
-                                    
-                                    # Keep the original camera folder name (don't add "Camera" prefix)
-                                    # This matches the actual file structure: archived_photos/human/2/2025-08-11/13-08-44.jpg
-                                    detection_dict["media_url"] = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
-                        except Exception as e:
-                            logging.warning(f"Error generating media_url for detection {detection.id}: {e}")
-                            detection_dict["media_url"] = None
-                    # Validate the detection_dict before creating DetectionResponse
-                    # This helps catch validation errors early
+        with ErrorContext("get_detections", camera_id=camera_id, limit=limit, offset=offset):
+            try:
+                # Skip the expensive count query - it's not needed for the response
+                # Only log if in debug mode to avoid performance impact
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    total_count = db.query(Detection).count()
+                    logging.debug(f"Total detections in database: {total_count}")
+                
+                query = db.query(Detection)
+                
+                if camera_id is not None:
+                    query = query.filter(Detection.camera_id == camera_id)
+                
+                if species is not None:
+                    query = query.filter(Detection.species.ilike(f"%{species}%"))
+                
+                if start_date:
                     try:
-                        detection_response = DetectionResponse(**detection_dict)
-                        result.append(detection_response)
-                    except Exception as validation_error:
-                        # Log the validation error with more details
-                        logging.error(f"Validation error for detection {detection.id}: {validation_error}")
-                        logging.error(f"Detection data: camera_id={detection_dict.get('camera_id')}, species={detection_dict.get('species')}, image_path={detection_dict.get('image_path')}")
+                        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                        query = query.filter(Detection.timestamp >= start_dt)
+                    except ValueError:
+                        pass  # Invalid date format, ignore
+                
+                if end_date:
+                    try:
+                        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                        query = query.filter(Detection.timestamp <= end_dt)
+                    except ValueError:
+                        pass  # Invalid date format, ignore
+                
+                # Apply search filter if provided (searches species, image_path, and camera name)
+                if search:
+                    search_term = f"%{search}%"
+                    # Join with Camera table to search camera names
+                    query = query.join(Camera, Detection.camera_id == Camera.id).filter(
+                        or_(
+                            Detection.species.ilike(search_term),
+                            Detection.image_path.ilike(search_term),
+                            Camera.name.ilike(search_term)
+                        )
+                    )
+                else:
+                    # No join needed if not searching
+                    pass
+                
+                # Apply ordering first (use index for performance)
+                query = query.order_by(Detection.timestamp.desc())
+                
+                # Apply limit FIRST to reduce query size (important for performance)
+                # Cap limit at 1000 to prevent extremely large queries that cause timeouts
+                effective_limit = min(limit or 50, 1000)
+                query = query.limit(effective_limit)
+                
+                # Apply offset if provided (after limit for better performance)
+                if offset is not None:
+                    query = query.offset(offset)
+                
+                detections = query.all()
+                logging.info(f"Query returned {len(detections)} detections from database")
+            
+                # Batch-fetch all cameras to avoid N+1 queries
+                camera_ids = {d.camera_id for d in detections if d.camera_id is not None}
+                cameras = {}
+                if camera_ids:
+                    cameras = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(camera_ids)).all()}
+            
+                # Convert to response models with media URLs
+                result = []
+                for detection in detections:
+                    try:
+                        camera = cameras.get(detection.camera_id) if detection.camera_id else None
+                        # Ensure camera_name is always a non-empty string (required by DetectionResponse)
+                        if camera and camera.name and str(camera.name).strip():
+                            camera_name = str(camera.name).strip()
+                        elif detection.camera_id:
+                            camera_name = f"Camera {detection.camera_id}"
+                        else:
+                            camera_name = "Unknown Camera"
+                        
+                        # Extract full taxonomy from detections_json if available
+                        full_taxonomy = None
+                        if detection.detections_json:
+                            try:
+                                detections_data = json.loads(detection.detections_json)
+                                if "predictions" in detections_data and detections_data["predictions"]:
+                                    full_taxonomy = detections_data["predictions"][0].get("prediction", detection.species)
+                                elif "species" in detections_data:
+                                    full_taxonomy = detections_data["species"]
+                            except:
+                                full_taxonomy = detection.species or "Unknown"
+                        
+                        # Ensure all required fields have valid values for DetectionResponse
+                        # DetectionBase requires: camera_id >= 1, species (non-empty), confidence (0.0-1.0), image_path (non-empty with valid extension)
+                        camera_id_val = int(detection.camera_id) if detection.camera_id and detection.camera_id >= 1 else 1
+                        species_val = str(detection.species).strip() if detection.species and str(detection.species).strip() else "Unknown"
+                        confidence_val = float(detection.confidence) if detection.confidence is not None else 0.0
+                        confidence_val = max(0.0, min(1.0, confidence_val))  # Clamp to 0.0-1.0
+                        
+                        # Normalize image_path to ensure it passes validation
+                        # The validator requires either a valid image extension or a temp path
+                        if detection.image_path and str(detection.image_path).strip():
+                            image_path_val = str(detection.image_path).strip()
+                            # Check if it has a valid extension
+                            valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+                            has_valid_ext = any(image_path_val.lower().endswith(ext) for ext in valid_extensions)
+                            # Check if it's a temp path
+                            is_temp_path = image_path_val.startswith('/tmp') or image_path_val.startswith('C:\\') or 'temp' in image_path_val.lower()
+                            # If neither, add .jpg extension to make it valid
+                            if not has_valid_ext and not is_temp_path:
+                                image_path_val = image_path_val + '.jpg'
+                        else:
+                            # Default to a valid temp path
+                            image_path_val = "/tmp/unknown.jpg"
+                        
+                        # Fix detections_json - it might be stored as Python dict string instead of JSON
+                        # The validator requires it to be valid JSON or None
+                        detections_json_val = None
+                        if detection.detections_json:
+                            try:
+                                # Try to parse as JSON first
+                                json.loads(detection.detections_json)
+                                detections_json_val = detection.detections_json  # Already valid JSON
+                            except (json.JSONDecodeError, TypeError):
+                                # If it's a Python dict string, convert it to JSON
+                                try:
+                                    if isinstance(detection.detections_json, str):
+                                        # Try to eval it as Python literal (dict)
+                                        parsed = ast.literal_eval(detection.detections_json)
+                                        detections_json_val = json.dumps(parsed)  # Convert to JSON string
+                                        # Verify the converted JSON is valid
+                                        json.loads(detections_json_val)
+                                    else:
+                                        detections_json_val = json.dumps(detection.detections_json)
+                                        # Verify the converted JSON is valid
+                                        json.loads(detections_json_val)
+                                except Exception as e:
+                                    # If all else fails, set to None (invalid JSON will fail validation)
+                                    logging.warning(f"Could not convert detections_json for detection {detection.id} to valid JSON: {e}")
+                                    detections_json_val = None
+                        
+                        detection_dict = {
+                            "id": detection.id,
+                            "camera_id": camera_id_val,
+                            "timestamp": detection.timestamp,
+                            "species": species_val,
+                            "full_taxonomy": full_taxonomy,
+                            "confidence": confidence_val,
+                            "image_path": image_path_val,
+                            "file_size": detection.file_size,
+                            "image_width": detection.image_width,
+                            "image_height": detection.image_height,
+                            "image_quality": detection.image_quality,
+                            "prediction_score": float(detection.prediction_score) if detection.prediction_score is not None else None,
+                            "detections_json": detections_json_val,
+                            "media_url": None,  # Will be set below
+                            "camera_name": str(camera_name)  # Add camera name to response
+                        }
+                
+                        # Generate media URL from image path
+                        if detection.image_path:
+                            try:
+                                # Normalize path for both Windows and Linux
+                                path = detection.image_path.replace("\\", "/")
+                                parts = path.split("/")
+                                # Look for motioneye_media/CameraX/date/filename or archived_photos/common_name/camera/date/filename
+                                if "motioneye_media" in parts:
+                                    idx = parts.index("motioneye_media")
+                                    if len(parts) > idx + 3:
+                                        camera_folder = parts[idx + 1]  # Camera1
+                                        date_folder = parts[idx + 2]    # 2025-07-15
+                                        filename = parts[idx + 3]       # 11-00-07.jpg
+                                        detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
+                                elif "archived_photos" in parts:
+                                    idx = parts.index("archived_photos")
+                                    if len(parts) > idx + 4:
+                                        # archived_photos/common_name/camera/date/filename
+                                        species_name = parts[idx + 1]    # human, vehicle, etc.
+                                        camera_folder = parts[idx + 2]   # 1, 2, etc.
+                                        date_folder = parts[idx + 3]    # 2025-08-11
+                                        filename = parts[idx + 4]        # 13-08-44.jpg
+                                        
+                                        # Keep the original camera folder name (don't add "Camera" prefix)
+                                        # This matches the actual file structure: archived_photos/human/2/2025-08-11/13-08-44.jpg
+                                        detection_dict["media_url"] = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+                            except Exception as e:
+                                logging.warning(f"Error generating media_url for detection {detection.id}: {e}")
+                                detection_dict["media_url"] = None
+                        # Validate the detection_dict before creating DetectionResponse
+                        # This helps catch validation errors early
+                        try:
+                            detection_response = DetectionResponse(**detection_dict)
+                            result.append(detection_response)
+                        except Exception as validation_error:
+                            # Log the validation error with more details
+                            logging.error(f"Validation error for detection {detection.id}: {validation_error}")
+                            logging.error(f"Detection data: camera_id={detection_dict.get('camera_id')}, species={detection_dict.get('species')}, image_path={detection_dict.get('image_path')}")
+                            import traceback
+                            logging.error(traceback.format_exc())
+                            # Skip this detection and continue
+                            continue
+                    except Exception as e:
+                        logging.error(f"Error processing detection {detection.id}: {e}")
                         import traceback
                         logging.error(traceback.format_exc())
                         # Skip this detection and continue
                         continue
-                except Exception as e:
-                    logging.error(f"Error processing detection {detection.id}: {e}")
-                    import traceback
-                    logging.error(traceback.format_exc())
-                    # Skip this detection and continue
-                    continue
-            logging.info(f"Successfully processed {len(result)} detections out of {len(detections)}")
-            return result
-        except Exception as e:
-            logging.error(f"Error in get_detections endpoint: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-            raise HTTPException(status_code=500, detail=f"Error fetching detections: {str(e)}")
+                logging.info(f"Successfully processed {len(result)} detections out of {len(detections)}")
+                return result
+            except Exception as e:
+                logging.error(f"Error in get_detections endpoint: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
+                raise HTTPException(status_code=500, detail=f"Error fetching detections: {str(e)}")
 
     @router.get("/api/detections", response_model=List[DetectionResponse])
     def get_detections_api(
