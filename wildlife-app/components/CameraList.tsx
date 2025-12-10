@@ -1,5 +1,6 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import axios from 'axios';
+import { usePathname } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from "@/components/ui/dialog";
@@ -24,17 +25,25 @@ const CameraList: React.FC = () => {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [selectedCamera, setSelectedCamera] = useState<Camera | null>(null);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const pathname = usePathname();
+  const hasFetchedRef = useRef(false);
 
   const fetchCameras = useCallback(async () => {
     try {
-      // Use cache for faster page navigation
-      const data = await getCameras(true);
+      setLoading(true);
+      // Use cache for faster page navigation, but force refresh if we haven't fetched yet
+      const useCache = hasFetchedRef.current;
+      const data = await getCameras(useCache);
       setCameras(data || []);
+      hasFetchedRef.current = true;
     } catch (error: any) {
       // getCameras() now returns [] for all errors (consistent with other API functions)
       // This catch block is defensive programming for unexpected errors
       console.error('Unexpected error fetching cameras:', error);
       setCameras([]);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -51,13 +60,39 @@ const CameraList: React.FC = () => {
     }
   }, [fetchCameras]);
 
+  // Fetch cameras when component mounts or when pathname changes to /cameras
   useEffect(() => {
-    // Fetch cameras on initial load (don't auto-sync - let user trigger sync manually)
-    fetchCameras();
-    // Refresh camera list every 30 seconds
-    const interval = setInterval(fetchCameras, 30000);
-    return () => clearInterval(interval);
+    const isCamerasPage = pathname === '/cameras';
+    
+    if (isCamerasPage) {
+      // Always fetch when on cameras page (handles navigation)
+      fetchCameras();
+      // Refresh camera list every 30 seconds
+      const interval = setInterval(fetchCameras, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [pathname, fetchCameras]);
+
+  // Also fetch on initial mount (in case pathname check doesn't trigger)
+  useEffect(() => {
+    if (!hasFetchedRef.current) {
+      fetchCameras();
+      hasFetchedRef.current = true;
+    }
   }, [fetchCameras]);
+
+  // Handle page visibility - refetch when page becomes visible and we're on cameras page
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && pathname === '/cameras') {
+        // Refetch when page becomes visible (handles tab switching)
+        fetchCameras();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [pathname, fetchCameras]);
 
   const handleCameraSelect = (camera: Camera) => {
     setSelectedCamera(camera);
@@ -185,7 +220,17 @@ const CameraList: React.FC = () => {
         </div>
       )}
 
-      {cameras.length === 0 ? (
+      {loading ? (
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-12">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mb-4"></div>
+            <h3 className="text-lg font-semibold mb-2">Loading cameras...</h3>
+            <p className="text-muted-foreground text-center">
+              Please wait while we fetch your cameras.
+            </p>
+          </CardContent>
+        </Card>
+      ) : cameras.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <h3 className="text-lg font-semibold mb-2">No cameras found</h3>

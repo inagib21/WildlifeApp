@@ -17,8 +17,9 @@ class SmartDetectionProcessor:
         self.high_confidence_threshold = 0.7
         self.medium_confidence_threshold = 0.5
         self.low_confidence_threshold = 0.3
-        # Minimum confidence to save detection (lowered to ensure more detections are saved)
-        self.min_confidence_to_save = 0.15
+        # Minimum confidence to save detection (lowered further to capture more wildlife)
+        # Even low confidence detections can be valuable for tracking activity
+        self.min_confidence_to_save = 0.10
         
         # Species name normalization rules
         self.species_aliases = {
