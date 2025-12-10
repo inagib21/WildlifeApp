@@ -31,14 +31,9 @@ const CameraList: React.FC = () => {
       const data = await getCameras(true);
       setCameras(data || []);
     } catch (error: any) {
-      console.error('Error fetching cameras:', error);
-      // Only show error if it's not a connection error (getCameras returns [] for offline)
-      if (!error.message?.includes('Cannot connect') && !error.message?.includes('Network Error')) {
-        const errorMessage = error.message || 'Failed to fetch cameras.';
-        toast.error(errorMessage, {
-          duration: 5000,
-        });
-      }
+      // getCameras() now returns [] for all errors (consistent with other API functions)
+      // This catch block is defensive programming for unexpected errors
+      console.error('Unexpected error fetching cameras:', error);
       setCameras([]);
     }
   }, []);
