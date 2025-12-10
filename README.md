@@ -169,20 +169,7 @@ See `wildlife-app/CAMERA_DETECTION_TROUBLESHOOTING.md` for detailed troubleshoot
 
 ## Recent Improvements
 
-### Backend Offline Handling & Stability (Latest)
-- **Graceful Offline Handling:** Frontend now handles backend offline scenarios gracefully
-  - All API functions return sensible defaults (empty arrays, zero counts) when backend is offline
-  - No error messages shown to users when backend is unavailable
-  - System health shows "offline" status instead of errors
-  - Components display empty states instead of crashing
-  - See `wildlife-app/lib/api.ts` for the `isBackendOffline()` helper function
-
-- **Backend Startup Fix:**
-  - Fixed critical IndentationError in `routers/detections.py` that prevented backend from starting
-  - Backend now starts successfully and all endpoints are functional
-  - Improved error handling in detection processing loop
-
-### Error Detection & Diagnostics
+### Error Detection & Diagnostics (Latest)
 - **Enhanced Error Detection System:** Comprehensive error categorization and tracking
   - Automatic error categorization (file_path_error, database_error, speciesnet_error, etc.)
   - Detailed error logging with full context and troubleshooting suggestions
