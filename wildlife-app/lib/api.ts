@@ -1,6 +1,7 @@
 import { Camera, Detection } from '@/types/api'
 import axios from 'axios'
 import { apiCache } from './api-cache'
+import { ApiDebugger } from './api-debug'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'
 
@@ -63,17 +64,26 @@ export const getCameras = async (useCache: boolean = true) => {
     }
     return response.data
   } catch (error: any) {
-    console.error('Error fetching cameras:', error)
+    ApiDebugger.logError(error, 'getCameras')
     // Provide more helpful error messages
     if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-      console.error('Request timed out. Please check if the backend server is running.')
-    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error')) {
-      console.error('Cannot connect to backend server. Please ensure the backend is running on port 8001.')
+      const timeoutError = new Error('Request timed out. Please check if the backend server is running.')
+      console.error(timeoutError.message)
+      throw timeoutError
+    } else if (error.code === 'ECONNREFUSED' || error.message?.includes('Network Error') || error.message?.includes('ERR_CONNECTION_REFUSED')) {
+      const connectionError = new Error(`Cannot connect to backend server at ${API_URL}. Please ensure the backend is running on port 8001.`)
+      console.error(connectionError.message)
       console.error(`Attempted URL: ${API_URL}/cameras`)
+      throw connectionError
     } else if (error.response) {
-      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+      const httpError = new Error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+      console.error(httpError.message)
+      throw httpError
     }
-    return []
+    // For unknown errors, still throw but with a generic message
+    const unknownError = new Error(`Failed to fetch cameras: ${error.message || 'Unknown error'}`)
+    console.error(unknownError.message)
+    throw unknownError
   }
 }
 
@@ -111,6 +121,8 @@ export interface DetectionFilters {
 }
 
 export async function getDetections(filters?: DetectionFilters, useCache: boolean = false): Promise<Detection[]> {
+  const startTime = performance.now()
+  console.debug('[API] getDetections called', { filters, useCache })
   // Only cache if no filters (or minimal filters) to avoid cache bloat
   const shouldCache = useCache && (!filters || (!filters.search && !filters.startDate && !filters.endDate))
   const cacheKey = `detections:${JSON.stringify(filters || {})}`
@@ -194,13 +206,21 @@ export async function getDetectionsLegacy(cameraId?: number, limit?: number): Pr
   return getDetections({ cameraId, limit })
 }
 
-export async function getDetectionsChunked(cameraId?: number, totalLimit: number = 2000): Promise<Detection[]> {
+export async function getDetectionsChunked(cameraId?: number, totalLimit: number = 500): Promise<Detection[]> {
   try {
-    const chunkSize = 500 // Process in chunks of 500
+    const chunkSize = 100 // Reduced chunk size from 500 to 100 for faster responses
     const allDetections: Detection[] = []
+    const maxChunks = Math.ceil(totalLimit / chunkSize) // Limit total number of chunks
     
-    for (let offset = 0; offset < totalLimit; offset += chunkSize) {
+    for (let chunkIndex = 0; chunkIndex < maxChunks; chunkIndex++) {
+      const offset = chunkIndex * chunkSize
       const limit = Math.min(chunkSize, totalLimit - offset)
+      
+      // Stop if we've reached the limit
+      if (offset >= totalLimit) {
+        break
+      }
+      
       const params = new URLSearchParams()
       
       if (cameraId) {
@@ -211,28 +231,35 @@ export async function getDetectionsChunked(cameraId?: number, totalLimit: number
       
       const url = `${API_URL}/detections?${params.toString()}`
       
-      const response = await axios.get(url, {
-        timeout: 30000 // 30 second timeout per chunk
-      })
-      
-      const chunkData = response.data
-      allDetections.push(...chunkData)
-      
-      // If we got fewer results than requested, we've reached the end
-      if (chunkData.length < limit) {
+      try {
+        const response = await axios.get(url, {
+          timeout: 15000 // Reduced timeout from 30s to 15s per chunk
+        })
+        
+        const chunkData = response.data || []
+        allDetections.push(...chunkData)
+        
+        // If we got fewer results than requested, we've reached the end
+        if (chunkData.length < limit) {
+          break
+        }
+      } catch (chunkError: any) {
+        // If a chunk fails, log it but continue with what we have
+        console.warn(`Failed to fetch chunk ${chunkIndex + 1}:`, chunkError.message)
+        // Return what we have so far instead of failing completely
         break
       }
       
       // Small delay between chunks to prevent overwhelming the server
-      if (offset + chunkSize < totalLimit) {
-        await new Promise(resolve => setTimeout(resolve, 100))
+      if (chunkIndex + 1 < maxChunks) {
+        await new Promise(resolve => setTimeout(resolve, 50)) // Reduced delay
       }
     }
     
     return allDetections
   } catch (error) {
     console.error('Error fetching detections chunked:', error)
-    return []
+    return [] // Return empty array instead of failing
   }
 }
 
