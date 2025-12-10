@@ -43,7 +43,7 @@ class SpeciesNetProcessor:
                 response = self.session.post(
                     f"{self.server_url}/predict",
                     files=files,
-                    timeout=(15, 60)  # 15s connect, 60s read (SpeciesNet model inference can take time)
+                    timeout=(15, 120)  # 15s connect, 120s read (increased for slow processing)
                 )
                 if response.status_code == 200:
                     return response.json()

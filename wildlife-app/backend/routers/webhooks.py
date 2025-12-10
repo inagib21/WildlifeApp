@@ -240,6 +240,14 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
         """Handle MotionEye webhook notifications for motion detection"""
         error_details = {}
         payload = {}
+        
+        # Log raw request details for debugging empty payloads
+        content_type = request.headers.get("content-type", "unknown")
+        method = request.method
+        url = str(request.url)
+        
+        logger.debug(f"Webhook request - Method: {method}, Content-Type: {content_type}, URL: {url}")
+        
         try:
             payload = await parse_motioneye_payload(request)
             data = payload["raw"]
@@ -269,11 +277,12 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                     "missing_camera_id": camera_id is None,
                     "missing_file_path": file_path is None,
                     "payload_keys": list(data.keys()) if data else [],
-                    "payload_size": len(str(data)) if data else 0
+                    "payload_size": len(str(data)) if data else 0,
+                    "raw_payload": str(data)[:200] if data else "empty"  # First 200 chars for debugging
                 }
                 
                 if not data:
-                    logger.warning("⚠️ MotionEye webhook: Empty payload received", extra=error_details)
+                    logger.warning("⚠️ MotionEye webhook: Empty payload received. Raw body was present but parsing failed.", extra=error_details)
                     log_audit_event(
                         db=db,
                         request=request,
@@ -284,7 +293,7 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                             **error_details
                         },
                         success=False,
-                        error_message="Empty webhook payload"
+                        error_message="Empty webhook payload - parsing failed"
                     )
                 else:
                     logger.warning(
@@ -414,10 +423,13 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                 return {"status": "skipped", "message": "Motion mask file (not processed)"}
             
             # Process image with SpeciesNet
+            predictions = None
+            speciesnet_error = None
             try:
                 predictions = speciesnet_processor.process_image(local_file_path)
                 if not predictions or "error" in predictions:
                     error_msg = predictions.get("error", "Unknown SpeciesNet error") if isinstance(predictions, dict) else "No predictions returned"
+                    speciesnet_error = error_msg
                     logger.warning(
                         f"⚠️ SpeciesNet processing failed for {local_file_path}: {error_msg}",
                         extra={
@@ -441,40 +453,85 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                         success=False,
                         error_message=f"SpeciesNet error: {error_msg}"
                     )
-                    return {
-                        "status": "error",
-                        "message": "SpeciesNet processing failed",
-                        "error_category": "speciesnet_error",
-                        "details": {"error": error_msg}
-                    }
-            except Exception as speciesnet_error:
-                error_type = type(speciesnet_error).__name__
+                    # Don't return early - continue with fallback detection
+                    logger.info(f"⚠️ Continuing with fallback detection after SpeciesNet error: {error_msg}")
+            except Exception as speciesnet_exception:
+                error_type = type(speciesnet_exception).__name__
+                speciesnet_error = f"{error_type}: {str(speciesnet_exception)}"
                 logger.error(
-                    f"❌ SpeciesNet processing exception: {error_type}: {str(speciesnet_error)}",
+                    f"❌ SpeciesNet processing exception: {error_type}: {str(speciesnet_exception)}",
                     extra={
                         "camera_id": camera_id,
                         "file_path": local_file_path,
                         "error_type": error_type,
-                        "error_message": str(speciesnet_error)
+                        "error_message": str(speciesnet_exception)
                     },
                     exc_info=True
                 )
-                log_audit_event(
-                    db=db,
-                    request=request,
-                    action="WEBHOOK_ERROR",
-                    resource_type="webhook",
-                    resource_id=camera_id,
-                    details={
-                        "error_category": "speciesnet_exception",
-                        "error_type": error_type,
-                        "error_message": str(speciesnet_error),
-                        "suggestion": "Check SpeciesNet server connectivity and image file format"
-                    },
-                    success=False,
-                    error_message=f"{error_type}: {str(speciesnet_error)}"
-                )
-                raise  # Re-raise to be caught by outer exception handler
+                # Don't raise - continue with fallback detection
+                logger.info(f"⚠️ Continuing with fallback detection after SpeciesNet exception")
+            
+            # If SpeciesNet failed, create a fallback detection
+            if not predictions or "error" in predictions or speciesnet_error:
+                logger.info(f"🔄 Creating fallback detection due to SpeciesNet failure")
+                # Create a basic detection with "Unknown" species
+                detection_data = {
+                    "camera_id": camera_id,
+                    "timestamp": datetime.now(),
+                    "species": "Unknown (SpeciesNet Error)",
+                    "confidence": 0.0,
+                    "image_path": local_file_path,
+                    "detections_json": json.dumps({
+                        "error": speciesnet_error or "SpeciesNet processing failed",
+                        "fallback": True
+                    })
+                }
+                
+                try:
+                    db_detection = Detection(**detection_data)
+                    db.add(db_detection)
+                    db.flush()
+                    db.commit()
+                    db.refresh(db_detection)
+                    
+                    logger.info(f"✅ Fallback detection created (ID: {db_detection.id}) due to SpeciesNet error")
+                    
+                    # Broadcast the detection
+                    detection_event = {
+                        "id": db_detection.id,
+                        "camera_id": camera_id,
+                        "camera_name": extracted_camera_name,
+                        "species": detection_data["species"],
+                        "confidence": detection_data["confidence"],
+                        "image_path": local_file_path,
+                        "timestamp": db_detection.timestamp.isoformat(),
+                        "media_url": f"/media/{extracted_camera_name}/{file_date}/{os.path.basename(local_file_path)}"
+                    }
+                    
+                    try:
+                        await event_manager.broadcast_detection(detection_event)
+                        logger.info(f"✅ Fallback detection broadcast (ID: {db_detection.id})")
+                    except Exception as broadcast_error:
+                        logger.warning(f"⚠️ Failed to broadcast fallback detection: {broadcast_error}")
+                    
+                    return {
+                        "status": "success",
+                        "detection_id": db_detection.id,
+                        "message": "Fallback detection created due to SpeciesNet error",
+                        "speciesnet_error": speciesnet_error
+                    }
+                except Exception as fallback_error:
+                    db.rollback()
+                    logger.error(f"❌ Failed to create fallback detection: {fallback_error}", exc_info=True)
+                    return {
+                        "status": "error",
+                        "message": "SpeciesNet processing failed and fallback detection creation failed",
+                        "error_category": "speciesnet_error",
+                        "details": {"error": speciesnet_error, "fallback_error": str(fallback_error)}
+                    }
+            
+            # Continue with normal processing if SpeciesNet succeeded
+            # Exception handling moved above - now handled inline
             
             # Use smart detection processor for enhanced analysis
             from services.smart_detection import SmartDetectionProcessor
@@ -944,5 +1001,83 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
         except Exception as e:
             logging.error(f"Failed to test webhook: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to test webhook: {str(e)}")
+
+    @router.get("/api/webhooks/diagnostics")
+    def webhook_diagnostics(db: Session = Depends(get_db)):
+        """Get webhook diagnostics including recent activity and configuration status"""
+        from sqlalchemy import text
+        from datetime import datetime, timedelta
+        
+        try:
+            # Get recent webhook activity (last hour)
+            one_hour_ago = datetime.now() - timedelta(hours=1)
+            webhook_logs = db.execute(
+                text("""
+                    SELECT action, timestamp, success, error_message, details
+                    FROM audit_logs
+                    WHERE action IN ('WEBHOOK', 'WEBHOOK_ERROR', 'WEBHOOK_IGNORED')
+                    AND timestamp >= :start_time
+                    ORDER BY timestamp DESC
+                    LIMIT 50
+                """),
+                {"start_time": one_hour_ago}
+            ).fetchall()
+            
+            # Count by status
+            total_webhooks = len(webhook_logs)
+            successful = sum(1 for w in webhook_logs if w.success)
+            failed = sum(1 for w in webhook_logs if not w.success)
+            empty_payloads = sum(1 for w in webhook_logs if w.error_message and "empty" in w.error_message.lower())
+            
+            # Get recent detections (last hour)
+            ten_minutes_ago = datetime.now() - timedelta(minutes=10)
+            recent_detections = db.query(Detection).filter(
+                Detection.timestamp >= ten_minutes_ago
+            ).order_by(Detection.timestamp.desc()).limit(10).all()
+            
+            # Get camera count
+            camera_count = db.query(Camera).count()
+            
+            return {
+                "status": "ok",
+                "webhook_activity": {
+                    "total_last_hour": total_webhooks,
+                    "successful": successful,
+                    "failed": failed,
+                    "empty_payloads": empty_payloads,
+                    "recent_logs": [
+                        {
+                            "action": w.action,
+                            "timestamp": w.timestamp.isoformat() if isinstance(w.timestamp, datetime) else str(w.timestamp),
+                            "success": w.success,
+                            "error": w.error_message[:100] if w.error_message else None
+                        }
+                        for w in webhook_logs[:10]
+                    ]
+                },
+                "recent_detections": {
+                    "count_last_10_min": len(recent_detections),
+                    "latest": [
+                        {
+                            "id": d.id,
+                            "camera_id": d.camera_id,
+                            "species": d.species,
+                            "timestamp": d.timestamp.isoformat() if isinstance(d.timestamp, datetime) else str(d.timestamp)
+                        }
+                        for d in recent_detections[:5]
+                    ]
+                },
+                "system": {
+                    "camera_count": camera_count,
+                    "webhook_url": "http://host.docker.internal:8001/api/motioneye/webhook",
+                    "webhook_script": "/etc/motioneye/send_webhook.sh"
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error getting webhook diagnostics: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "error": str(e)
+            }
 
     return router

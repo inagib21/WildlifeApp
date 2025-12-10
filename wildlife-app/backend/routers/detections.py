@@ -212,29 +212,47 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
                         # Generate media URL from image path
                         if detection.image_path:
                             try:
+                                import os
                                 # Normalize path for both Windows and Linux
                                 path = detection.image_path.replace("\\", "/")
-                                parts = path.split("/")
-                                # Look for motioneye_media/CameraX/date/filename or archived_photos/common_name/camera/date/filename
-                                if "motioneye_media" in parts:
-                                    idx = parts.index("motioneye_media")
-                                    if len(parts) > idx + 3:
-                                        camera_folder = parts[idx + 1]  # Camera1
-                                        date_folder = parts[idx + 2]    # 2025-07-15
-                                        filename = parts[idx + 3]       # 11-00-07.jpg
-                                        detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
-                                elif "archived_photos" in parts:
-                                    idx = parts.index("archived_photos")
-                                    if len(parts) > idx + 4:
-                                        # archived_photos/common_name/camera/date/filename
-                                        species_name = parts[idx + 1]    # human, vehicle, etc.
-                                        camera_folder = parts[idx + 2]   # 1, 2, etc.
-                                        date_folder = parts[idx + 3]    # 2025-08-11
-                                        filename = parts[idx + 4]        # 13-08-44.jpg
-                                        
-                                        # Keep the original camera folder name (don't add "Camera" prefix)
-                                        # This matches the actual file structure: archived_photos/human/2/2025-08-11/13-08-44.jpg
-                                        detection_dict["media_url"] = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+                                # Remove empty parts and normalize
+                                parts = [p for p in path.split("/") if p]
+                                
+                                # Find the filename (last segment with image extension)
+                                image_extensions = ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
+                                filename = None
+                                filename_idx = -1
+                                for i in range(len(parts) - 1, -1, -1):
+                                    if "." in parts[i]:
+                                        ext = parts[i].split(".")[-1].lower()
+                                        if ext in image_extensions:
+                                            filename = parts[i]
+                                            filename_idx = i
+                                            break
+                                
+                                if not filename:
+                                    # No valid filename found, skip
+                                    detection_dict["media_url"] = None
+                                else:
+                                    # Look for motioneye_media/CameraX/date/filename
+                                    if "motioneye_media" in parts:
+                                        idx = parts.index("motioneye_media")
+                                        if len(parts) > idx + 2 and filename_idx > idx + 2:
+                                            camera_folder = parts[idx + 1]  # Camera1
+                                            date_folder = parts[idx + 2]    # 2025-07-15
+                                            # Use the found filename
+                                            detection_dict["media_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
+                                    # Look for archived_photos/common_name/camera/date/filename
+                                    elif "archived_photos" in parts:
+                                        idx = parts.index("archived_photos")
+                                        if len(parts) > idx + 3 and filename_idx > idx + 3:
+                                            species_name = parts[idx + 1]    # human, vehicle, etc.
+                                            camera_folder = parts[idx + 2]   # 1, 2, etc.
+                                            date_folder = parts[idx + 3]    # 2025-08-11
+                                            # Use the found filename
+                                            detection_dict["media_url"] = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+                                    else:
+                                        detection_dict["media_url"] = None
                             except Exception as e:
                                 logging.warning(f"Error generating media_url for detection {detection.id}: {e}")
                                 detection_dict["media_url"] = None
@@ -517,23 +535,34 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
             media_url = None
             if detection.image_path:
                 path = detection.image_path.replace("\\", "/")
-                parts = path.split("/")
+                parts = [p for p in path.split("/") if p]
                 
-                if "motioneye_media" in parts:
-                    idx = parts.index("motioneye_media")
-                    if len(parts) > idx + 3:
-                        camera_folder = parts[idx + 1]
-                        date_folder = parts[idx + 2]
-                        filename = parts[idx + 3]
-                        media_url = f"/media/{camera_folder}/{date_folder}/{filename}"
-                elif "archived_photos" in parts:
-                    idx = parts.index("archived_photos")
-                    if len(parts) > idx + 4:
-                        species_name = parts[idx + 1]
-                        camera_folder = parts[idx + 2]
-                        date_folder = parts[idx + 3]
-                        filename = parts[idx + 4]
-                        media_url = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+                # Find the filename (last segment with image extension)
+                image_extensions = ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
+                filename = None
+                filename_idx = -1
+                for i in range(len(parts) - 1, -1, -1):
+                    if "." in parts[i]:
+                        ext = parts[i].split(".")[-1].lower()
+                        if ext in image_extensions:
+                            filename = parts[i]
+                            filename_idx = i
+                            break
+                
+                if filename:
+                    if "motioneye_media" in parts:
+                        idx = parts.index("motioneye_media")
+                        if len(parts) > idx + 2 and filename_idx > idx + 2:
+                            camera_folder = parts[idx + 1]
+                            date_folder = parts[idx + 2]
+                            media_url = f"/media/{camera_folder}/{date_folder}/{filename}"
+                    elif "archived_photos" in parts:
+                        idx = parts.index("archived_photos")
+                        if len(parts) > idx + 3 and filename_idx > idx + 3:
+                            species_name = parts[idx + 1]
+                            camera_folder = parts[idx + 2]
+                            date_folder = parts[idx + 3]
+                            media_url = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
             
             return {
                 "detection_id": detection_id,

@@ -280,10 +280,12 @@ class SmartDetectionProcessor:
         
         # Always save if confidence meets minimum threshold
         if confidence >= self.min_confidence_to_save:
+            # Don't filter out "Blank" detections - they're valid detections that should be saved
             # Only filter out Unknown species if confidence is very low (< 0.2)
             if species == "Unknown" and confidence < 0.2:
                 logger.debug(f"Not saving detection: Unknown species with very low confidence ({confidence:.3f})")
                 return False
+            # Save blank detections (they indicate no wildlife was detected, which is useful information)
             logger.debug(f"Saving detection: {species} with confidence {confidence:.3f}")
             return True
         

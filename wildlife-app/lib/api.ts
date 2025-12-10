@@ -70,9 +70,9 @@ export const getCameras = async (useCache: boolean = true) => {
         'Content-Type': 'application/json'
       }
     })
-    // Cache the response for 5 seconds
+    // Cache the response for 15 seconds (increased for better performance)
     if (useCache) {
-      apiCache.set(cacheKey, response.data, 5000)
+      apiCache.set(cacheKey, response.data, 15000)
     }
     return response.data
   } catch (error: any) {
@@ -182,9 +182,9 @@ export async function getDetections(filters?: DetectionFilters, useCache: boolea
       timeout: 60000 // 60 second timeout for large responses
     })
     
-    // Cache for 3 seconds (detections change frequently)
+    // Cache for 10 seconds (increased for better performance, detections still update via SSE)
     if (shouldCache) {
-      apiCache.set(cacheKey, response.data, 3000)
+      apiCache.set(cacheKey, response.data, 10000)
     }
     
     return response.data

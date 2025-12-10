@@ -81,12 +81,18 @@ async def parse_motioneye_payload(request: Request) -> Dict[str, Any]:
     )
 
     for parser in parsers:
-        if inspect.iscoroutinefunction(parser):
-            chunk = await parser(request)
-        else:
-            chunk = parser(request)
-        if chunk:
-            data.update(chunk)
+        try:
+            if inspect.iscoroutinefunction(parser):
+                chunk = await parser(request)
+            else:
+                chunk = parser(request)
+            if chunk:
+                data.update(chunk)
+        except Exception as e:
+            # Log parser errors but continue trying other parsers
+            import logging
+            logging.debug(f"Parser {parser.__name__} failed: {e}")
+            continue
 
     # Extract file_path first (needed for camera_id extraction fallback)
     file_path = _first_present(

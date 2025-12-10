@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Detection } from "@/types/api"
-import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions, deleteDetection, bulkDeleteDetections, DetectionFilters, getCameras } from "@/lib/api"
+import { getDetections, getDetectionsCount, getDetectionsChunked, exportDetections, ExportOptions, deleteDetection, bulkDeleteDetections, DetectionFilters, getCameras, getSpeciesCounts } from "@/lib/api"
 import { Camera } from "@/types/api"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Button } from "@/components/ui/button"
@@ -21,8 +21,19 @@ function generateMediaUrl(imagePath: string): string {
   
   try {
     // Normalize path for both Windows and Linux
-    const path = imagePath.replace(/\\/g, "/")
-    const parts = path.split("/")
+    let path = imagePath.replace(/\\/g, "/")
+    // Remove any duplicate path segments while preserving order
+    const pathParts = path.split("/").filter(p => p)
+    const uniqueParts: string[] = []
+    const seen = new Set<string>()
+    for (const part of pathParts) {
+      if (!seen.has(part)) {
+        seen.add(part)
+        uniqueParts.push(part)
+      }
+    }
+    path = uniqueParts.join("/")
+    const parts = path.split("/").filter(p => p)
     
     // Look for motioneye_media/CameraX/date/filename
     if (path.includes("motioneye_media")) {
@@ -30,8 +41,18 @@ function generateMediaUrl(imagePath: string): string {
       if (parts.length > idx + 3) {
         const camera = parts[idx + 1]
         const date = parts[idx + 2]
-        const filename = parts[idx + 3]
-        return `/media/${camera}/${date}/${filename}`
+        // Use the last part as filename to handle any extra path segments
+        const filename = parts[parts.length - 1]
+        // Validate that filename looks like a file (has extension)
+        const imageExtensions = ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
+        const fileExt = filename.split(".").pop()?.toLowerCase()
+        if (fileExt && imageExtensions.includes(fileExt)) {
+          return `/media/${camera}/${date}/${filename}`
+        } else {
+          // Fallback to original logic if last part isn't a file
+          const fallbackFilename = parts[idx + 3] || parts[parts.length - 1]
+          return `/media/${camera}/${date}/${fallbackFilename}`
+        }
       }
     }
     
@@ -42,8 +63,18 @@ function generateMediaUrl(imagePath: string): string {
         const species = parts[idx + 1]
         const camera = parts[idx + 2]
         const date = parts[idx + 3]
-        const filename = parts[idx + 4]
-        return `/archived_photos/${species}/${camera}/${date}/${filename}`
+        // Use the last part as filename to handle any extra path segments
+        const filename = parts[parts.length - 1]
+        // Validate that filename looks like a file (has extension)
+        const imageExtensions = ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
+        const fileExt = filename.split(".").pop()?.toLowerCase()
+        if (fileExt && imageExtensions.includes(fileExt)) {
+          return `/archived_photos/${species}/${camera}/${date}/${filename}`
+        } else {
+          // Fallback to original logic if last part isn't a file
+          const fallbackFilename = parts[idx + 4] || parts[parts.length - 1]
+          return `/archived_photos/${species}/${camera}/${date}/${fallbackFilename}`
+        }
       }
     }
     
@@ -72,15 +103,87 @@ export function DetectionsList() {
   const [backendConnected, setBackendConnected] = React.useState<boolean | null>(null)
   const [cameras, setCameras] = React.useState<Camera[]>([])
   const [selectedCameraId, setSelectedCameraId] = React.useState<number | undefined>(undefined)
+  const [speciesList, setSpeciesList] = React.useState<Array<{species: string, count: number}>>([])
+  const [selectedSpecies, setSelectedSpecies] = React.useState<string | undefined>(undefined)
 
-  // Handle search on Enter key press
+  // Debounce search query to avoid excessive API calls
+  React.useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      if (searchQuery !== activeSearchQuery) {
+        setActiveSearchQuery(searchQuery)
+        setPage(0) // Reset to first page when searching
+      }
+    }, 500) // Wait 500ms after user stops typing
+
+    return () => clearTimeout(timeoutId)
+  }, [searchQuery, activeSearchQuery])
+
+  // Handle search on Enter key press (immediate search)
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault()
-      setActiveSearchQuery(searchQuery) // Trigger search when Enter is pressed
+      setActiveSearchQuery(searchQuery) // Trigger search immediately when Enter is pressed
       setPage(0) // Reset to first page when searching
     }
   }
+
+  // Fetch cameras on mount
+  React.useEffect(() => {
+    const fetchCameras = async () => {
+      try {
+        const cameraData = await getCameras(true)
+        setCameras(cameraData || [])
+      } catch (error) {
+        console.error('Failed to fetch cameras:', error)
+        setCameras([])
+      }
+    }
+    fetchCameras()
+    // Refresh cameras every 30 seconds
+    const interval = setInterval(fetchCameras, 30000)
+    return () => clearInterval(interval)
+  }, [])
+
+  // Fetch species list on mount (deferred - don't block initial render)
+  React.useEffect(() => {
+    // Defer species list loading to not block initial page load
+    const timeoutId = setTimeout(() => {
+      const fetchSpecies = async () => {
+        try {
+          const speciesData = await getSpeciesCounts('all')
+          // Sort by count descending, then alphabetically
+          const sorted = speciesData.sort((a, b) => {
+            if (b.count !== a.count) return b.count - a.count
+            return a.species.localeCompare(b.species)
+          })
+          setSpeciesList(sorted)
+        } catch (error) {
+          console.error('Failed to fetch species list:', error)
+          setSpeciesList([])
+        }
+      }
+      fetchSpecies()
+    }, 500) // Wait 500ms after mount to prioritize detections loading
+    
+    // Refresh species list every 5 minutes
+    const interval = setInterval(async () => {
+      try {
+        const speciesData = await getSpeciesCounts('all')
+        const sorted = speciesData.sort((a, b) => {
+          if (b.count !== a.count) return b.count - a.count
+          return a.species.localeCompare(b.species)
+        })
+        setSpeciesList(sorted)
+      } catch (error) {
+        // Silent fail on refresh
+      }
+    }, 300000)
+    
+    return () => {
+      clearTimeout(timeoutId)
+      clearInterval(interval)
+    }
+  }, [])
 
   // Check backend connection status
   React.useEffect(() => {
@@ -104,24 +207,39 @@ export function DetectionsList() {
   }, [])
 
   React.useEffect(() => {
+    let cancelled = false
     setLoading(true)
+    
     const fetchPage = async () => {
       try {
         const offset = page * PAGE_SIZE
-        // Use cache only for first page without search or camera filter (faster navigation)
-        const useCache = page === 0 && !activeSearchQuery && !selectedCameraId
+        // Use cache for faster navigation (increased cache usage)
+        const useCache = page === 0 && !activeSearchQuery && !selectedCameraId && !selectedSpecies
         const filters: DetectionFilters = {
           limit: PAGE_SIZE,
           offset: offset,
           search: activeSearchQuery || undefined,
-          cameraId: selectedCameraId
+          cameraId: selectedCameraId,
+          species: selectedSpecies
         }
         const data = await getDetections(filters, useCache)
+        
+        // Don't update state if request was cancelled
+        if (cancelled) return
+        
         setDetections(data)
         setBackendConnected(true) // Success means backend is connected
-        // Fetch count in parallel (don't block on it)
-        getDetectionsCount().then(count => setTotalCount(count)).catch(() => {})
+        
+        // Fetch count in parallel (don't block on it) - only if not cancelled
+        if (!cancelled) {
+          getDetectionsCount().then(count => {
+            if (!cancelled) setTotalCount(count)
+          }).catch(() => {})
+        }
       } catch (error: any) {
+        // Don't update state if request was cancelled
+        if (cancelled) return
+        
         console.error('Failed to fetch detections:', error)
         // Show user-friendly error message
         if (error.message?.includes('Network Error') || error.code === 'ECONNREFUSED' || error.message?.includes('ERR_NETWORK')) {
@@ -141,11 +259,19 @@ export function DetectionsList() {
         setDetections([])
         setTotalCount(0)
       } finally {
-        setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+        }
       }
     }
+    
     fetchPage()
-  }, [page, activeSearchQuery, selectedCameraId])
+    
+    // Cleanup: cancel request if component unmounts or dependencies change
+    return () => {
+      cancelled = true
+    }
+  }, [page, activeSearchQuery, selectedCameraId, selectedSpecies])
 
   // Subscribe to real-time detection updates via SSE using the hook
   const { isConnected: sseConnected, error: sseError } = useDetectionsRealtime((newDetection) => {
@@ -229,7 +355,14 @@ export function DetectionsList() {
   const handleExport = async (format: 'csv' | 'json' | 'pdf' = 'csv') => {
     try {
       setExporting(true)
-      const blob = await exportDetections({ format })
+      // Include current filters in export
+      const exportOptions: ExportOptions = {
+        format,
+        cameraId: selectedCameraId,
+        species: selectedSpecies,
+        search: activeSearchQuery || undefined
+      }
+      const blob = await exportDetections(exportOptions)
       
       // Create download link
       const url = window.URL.createObjectURL(blob)
@@ -386,7 +519,7 @@ export function DetectionsList() {
       
       {/* Search and Export Controls */}
       <div className="flex items-center gap-4">
-        <div className="flex-1 flex items-center gap-2">
+        <div className="flex-1 flex items-center gap-2 flex-wrap">
           <Input
             type="text"
             placeholder="Search detections (species, camera, path)... Press Enter to search"
@@ -402,7 +535,7 @@ export function DetectionsList() {
               setPage(0) // Reset to first page when filtering
             }}
           >
-            <SelectTrigger className="w-[200px]">
+            <SelectTrigger className="w-[180px]">
               <SelectValue placeholder="Filter by camera" />
             </SelectTrigger>
             <SelectContent>
@@ -410,6 +543,25 @@ export function DetectionsList() {
               {cameras.map((camera) => (
                 <SelectItem key={camera.id} value={camera.id.toString()}>
                   {camera.name || `Camera ${camera.id}`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={selectedSpecies || "all"}
+            onValueChange={(value) => {
+              setSelectedSpecies(value === "all" ? undefined : value)
+              setPage(0) // Reset to first page when filtering
+            }}
+          >
+            <SelectTrigger className="w-[200px]">
+              <SelectValue placeholder="Filter by species" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Species</SelectItem>
+              {speciesList.map((item) => (
+                <SelectItem key={item.species} value={item.species}>
+                  {item.species} ({item.count})
                 </SelectItem>
               ))}
             </SelectContent>
@@ -490,17 +642,50 @@ export function DetectionsList() {
               </TableRow>
             ) : (
               sortedDetections.map((detection) => {
-                // Debug logging to see what we're getting
-                console.log(`Detection ${detection.id}:`, {
-                  media_url: detection.media_url,
-                  image_path: detection.image_path,
-                  species: detection.species
-                })
-                
                 // Use backend media_url if available, otherwise generate from image_path
                 let validImageUrl = detection.media_url && (detection.media_url.startsWith("/") || detection.media_url.startsWith("http")) 
                   ? detection.media_url 
                   : generateMediaUrl(detection.image_path)
+                
+                // Validate and fix malformed URLs with duplicate path segments
+                if (validImageUrl && validImageUrl !== "/file.svg") {
+                  // Extract just the pathname part for validation
+                  let pathToCheck = validImageUrl
+                  if (validImageUrl.startsWith("http")) {
+                    try {
+                      const urlObj = new URL(validImageUrl)
+                      pathToCheck = urlObj.pathname
+                    } catch (e) {
+                      // If URL parsing fails, try to extract path manually
+                      const match = validImageUrl.match(/\/\/[^\/]+(\/.*)/)
+                      pathToCheck = match ? match[1] : validImageUrl
+                    }
+                  }
+                  
+                  // Check for duplicate path segments (e.g., /media/Camera3/2025-12-10/15-14-06.jpg/2025-12-10/15-14-06.jpg)
+                  const pathParts = pathToCheck.split("/").filter(p => p)
+                  
+                  // Check for patterns like: date/filename/date/filename or camera/date/filename/camera/date/filename
+                  let hasDuplicates = false
+                  if (pathParts.length >= 4) {
+                    // Check if the last 2-4 segments repeat earlier segments
+                    const lastSegment = pathParts[pathParts.length - 1]
+                    const secondLastSegment = pathParts[pathParts.length - 2]
+                    // Look for this pattern earlier in the path
+                    for (let i = 0; i < pathParts.length - 2; i++) {
+                      if (pathParts[i] === secondLastSegment && i + 1 < pathParts.length && pathParts[i + 1] === lastSegment) {
+                        hasDuplicates = true
+                        break
+                      }
+                    }
+                  }
+                  
+                  // If duplicates found, regenerate from image_path
+                  if (hasDuplicates) {
+                    console.warn(`Image load error for detection ${detection.id} "URL:" "${validImageUrl}" - duplicate path segments detected, regenerating from image_path`)
+                    validImageUrl = generateMediaUrl(detection.image_path)
+                  }
+                }
                 
                 // If media_url starts with "/", prepend the backend URL
                 if (validImageUrl && validImageUrl.startsWith("/") && !validImageUrl.startsWith("http")) {
@@ -527,7 +712,6 @@ export function DetectionsList() {
                       <div 
                         className="relative w-24 h-16 cursor-pointer hover:opacity-80 transition-opacity" 
                         onClick={() => {
-                          console.log('Clicking detection:', detection.id, 'Image URL:', validImageUrl)
                           setSelectedDetection(detection)
                         }}
                         role="button"
@@ -544,9 +728,12 @@ export function DetectionsList() {
                           alt={`Detection ${detection.id}`} 
                           fill 
                           className="object-cover rounded"
-                          unoptimized={validImageUrl.startsWith('http://localhost:8001')}
+                          loading="lazy"
+                          sizes="96px"
+                          quality={75}
+                          unoptimized={validImageUrl.startsWith('http://localhost:8001') || validImageUrl.startsWith('http://192.168')}
                           onError={(e) => {
-                            console.error('Image load error for detection', detection.id, 'URL:', validImageUrl)
+                            // Silent error handling for performance
                             e.currentTarget.src = '/file.svg'
                           }}
                         />
