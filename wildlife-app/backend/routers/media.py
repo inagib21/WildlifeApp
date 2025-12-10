@@ -15,7 +15,14 @@ def setup_media_router() -> APIRouter:
     def get_media(camera: str, date: str, filename: str):
         """Serve media files from motioneye_media or archived_photos"""
         # Always resolve from the project root (wildlife-app)
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # __file__ is: wildlife-app/backend/routers/media.py
+        # We need: wildlife-app/
+        current_file = os.path.abspath(__file__)  # .../wildlife-app/backend/routers/media.py
+        routers_dir = os.path.dirname(current_file)  # .../wildlife-app/backend/routers
+        backend_dir = os.path.dirname(routers_dir)  # .../wildlife-app/backend
+        project_root = os.path.dirname(backend_dir)  # .../wildlife-app
+        
+        # Handle both "Camera1" and "1" formats
         camera_name = f"Camera{camera}" if camera.isdigit() else camera
         
         # First try to find the file in motioneye_media
@@ -23,6 +30,14 @@ def setup_media_router() -> APIRouter:
             project_root,
             "motioneye_media", camera_name, date, filename
         )
+        
+        # Also try alternative paths (in case backend is running from different directory)
+        alt_paths = [
+            motioneye_path,
+            os.path.join(os.getcwd(), "motioneye_media", camera_name, date, filename),
+            os.path.join(os.getcwd(), "..", "motioneye_media", camera_name, date, filename),
+            os.path.join(backend_dir, "..", "motioneye_media", camera_name, date, filename),
+        ]
         
         # Also check in archived_photos (search all species folders)
         archive_path = None
@@ -40,17 +55,35 @@ def setup_media_router() -> APIRouter:
                     archive_path = species_path_alt
                     break
         
-        logger.debug(f"Media request: camera={camera}, date={date}, filename={filename}")
-        logger.debug(f"Looking for file in motioneye: {motioneye_path}")
-        logger.debug(f"Looking for file in archive: {archive_path}")
+        logger.info(f"Media request: camera={camera}, date={date}, filename={filename}")
+        logger.info(f"Project root: {project_root}")
+        logger.info(f"Camera name: {camera_name}")
+        logger.info(f"Primary path: {motioneye_path}")
+        logger.info(f"Primary path exists: {os.path.exists(motioneye_path)}")
         
-        # Return the file from wherever it's found
-        if os.path.exists(motioneye_path):
-            return FileResponse(motioneye_path)
-        elif archive_path and os.path.exists(archive_path):
-            return FileResponse(archive_path)
-        else:
-            raise HTTPException(status_code=404, detail=f"File not found in motioneye_media or archive")
+        # Try all alternative paths
+        for alt_path in alt_paths:
+            if os.path.exists(alt_path):
+                logger.info(f"Found file at: {alt_path}")
+                return FileResponse(alt_path, media_type="image/jpeg")
+        
+        if archive_path and os.path.exists(archive_path):
+            logger.info(f"Found file in archive: {archive_path}")
+            return FileResponse(archive_path, media_type="image/jpeg")
+        
+        # If not found, provide detailed error
+        error_detail = f"File not found. Searched paths:\n"
+        error_detail += f"  - {motioneye_path}\n"
+        for alt_path in alt_paths[1:]:
+            error_detail += f"  - {alt_path}\n"
+        if archive_path:
+            error_detail += f"  - Archive: {archive_path}\n"
+        error_detail += f"Project root: {project_root}\n"
+        error_detail += f"Current working directory: {os.getcwd()}\n"
+        error_detail += f"MotionEye media dir exists: {os.path.exists(os.path.join(project_root, 'motioneye_media'))}"
+        
+        logger.error(error_detail)
+        raise HTTPException(status_code=404, detail=error_detail)
 
     @router.get("/archived_photos/{species}/{camera}/{date}/{filename}")
     def serve_archived_photo(species: str, camera: str, date: str, filename: str):

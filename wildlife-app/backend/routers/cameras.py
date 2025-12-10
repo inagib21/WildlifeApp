@@ -38,115 +38,119 @@ def setup_cameras_router(limiter: Limiter, get_db) -> APIRouter:
     @limiter.limit("120/minute")
     def get_cameras(request: Request, db: Session = Depends(get_db)):
         """Get list of all cameras"""
-        try:
-            cached = get_cached("cameras_list", ttl=60)
-            if cached:
-                return cached
-            
-            cameras = db.query(Camera).all()
-            camera_ids = [camera.id for camera in cameras]
-            
-            # Get detection counts for all cameras at once
-            detection_counts = {}
-            if camera_ids:
-                from sqlalchemy import func
-                counts_query = db.query(
-                    Detection.camera_id,
-                    func.count(Detection.id).label('count')
-                ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).all()
-                detection_counts = {camera_id: count for camera_id, count in counts_query}
-            
-            # Get last detection timestamps
-            last_detections = {}
-            if camera_ids:
-                from sqlalchemy import func
-                subquery = db.query(
-                    Detection.camera_id,
-                    func.max(Detection.timestamp).label('max_timestamp')
-                ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).subquery()
+        from utils.error_handler import ErrorContext, handle_database_error
+        from sqlalchemy.exc import SQLAlchemyError
+        
+        with ErrorContext("get_cameras"):
+            try:
+                cached = get_cached("cameras_list", ttl=60)
+                if cached:
+                    return cached
                 
-                last_detections_query = db.query(Detection).join(
-                    subquery,
-                    (Detection.camera_id == subquery.c.camera_id) & 
-                    (Detection.timestamp == subquery.c.max_timestamp)
-                ).all()
-                last_detections = {det.camera_id: det.timestamp.isoformat() for det in last_detections_query}
-            
-            result = []
-            for camera in cameras:
-                try:
-                    detection_count = detection_counts.get(camera.id, 0)
-                    last_detection_time = last_detections.get(camera.id)
-                    status = "active" if (camera.is_active if camera.is_active is not None else True) else "inactive"
+                cameras = db.query(Camera).all()
+                camera_ids = [camera.id for camera in cameras]
+                
+                # Get detection counts for all cameras at once
+                detection_counts = {}
+                if camera_ids:
+                    from sqlalchemy import func
+                    counts_query = db.query(
+                        Detection.camera_id,
+                        func.count(Detection.id).label('count')
+                    ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).all()
+                    detection_counts = {camera_id: count for camera_id, count in counts_query}
+                
+                # Get last detection timestamps
+                last_detections = {}
+                if camera_ids:
+                    from sqlalchemy import func
+                    subquery = db.query(
+                        Detection.camera_id,
+                        func.max(Detection.timestamp).label('max_timestamp')
+                    ).filter(Detection.camera_id.in_(camera_ids)).group_by(Detection.camera_id).subquery()
                     
-                    camera_name = str(camera.name).strip() if camera.name and str(camera.name).strip() else "Unnamed Camera"
-                    camera_url = str(camera.url).strip() if camera.url and str(camera.url).strip() else "rtsp://localhost"
-                    
-                    width_val = max(320, min(7680, int(camera.width) if camera.width is not None else 1280))
-                    height_val = max(240, min(4320, int(camera.height) if camera.height is not None else 720))
-                    framerate_val = max(1, min(120, int(camera.framerate) if camera.framerate is not None else 30))
-                    stream_port_val = max(1024, min(65535, int(camera.stream_port) if camera.stream_port is not None else 8081))
-                    stream_quality_val = max(1, min(100, int(camera.stream_quality) if camera.stream_quality is not None else 100))
-                    stream_maxrate_val = max(1, min(120, int(camera.stream_maxrate) if camera.stream_maxrate is not None else 30))
-                    detection_threshold_val = max(0, min(100000, int(camera.detection_threshold) if camera.detection_threshold is not None else 1500))
-                    detection_smart_mask_speed_val = max(0, min(100, int(camera.detection_smart_mask_speed) if camera.detection_smart_mask_speed is not None else 10))
-                    movie_quality_val = max(1, min(100, int(camera.movie_quality) if camera.movie_quality is not None else 100))
-                    snapshot_interval_val = max(0, min(3600, int(camera.snapshot_interval) if camera.snapshot_interval is not None else 0))
-                    
-                    movie_codec_val = "mkv"
-                    if camera.movie_codec:
-                        codec = str(camera.movie_codec).strip()
-                        if ':' in codec:
-                            codec = codec.split(':')[0]
-                        movie_codec_val = codec[:50] if len(codec) > 50 else codec
-                    
-                    target_dir_val = str(camera.target_dir).strip() if camera.target_dir and str(camera.target_dir).strip() else "./motioneye_media"
-                    
-                    camera_dict = {
-                        "id": camera.id,
-                        "name": camera_name,
-                        "url": camera_url,
-                        "is_active": camera.is_active if camera.is_active is not None else True,
-                        "width": width_val,
-                        "height": height_val,
-                        "framerate": framerate_val,
-                        "stream_port": stream_port_val,
-                        "stream_quality": stream_quality_val,
-                        "stream_maxrate": stream_maxrate_val,
-                        "stream_localhost": camera.stream_localhost if camera.stream_localhost is not None else False,
-                        "detection_enabled": camera.detection_enabled if camera.detection_enabled is not None else True,
-                        "detection_threshold": detection_threshold_val,
-                        "detection_smart_mask_speed": detection_smart_mask_speed_val,
-                        "movie_output": camera.movie_output if camera.movie_output is not None else True,
-                        "movie_quality": movie_quality_val,
-                        "movie_codec": movie_codec_val,
-                        "snapshot_interval": snapshot_interval_val,
-                        "target_dir": target_dir_val,
-                        "created_at": camera.created_at,
-                        "stream_url": motioneye_client.get_camera_stream_url(camera.id) if camera.id else None,
-                        "mjpeg_url": motioneye_client.get_camera_mjpeg_url(camera.id) if camera.id else None,
-                        "detection_count": detection_count,
-                        "last_detection": last_detection_time,
-                        "status": status,
-                        "location": None,
-                    }
-                    
+                    last_detections_query = db.query(Detection).join(
+                        subquery,
+                        (Detection.camera_id == subquery.c.camera_id) & 
+                        (Detection.timestamp == subquery.c.max_timestamp)
+                    ).all()
+                    last_detections = {det.camera_id: det.timestamp.isoformat() for det in last_detections_query}
+                
+                result = []
+                for camera in cameras:
                     try:
-                        camera_response = CameraResponse(**camera_dict)
-                        result.append(camera_response)
-                    except Exception as validation_error:
-                        logger.error(f"Validation error for camera {camera.id}: {validation_error}")
+                        detection_count = detection_counts.get(camera.id, 0)
+                        last_detection_time = last_detections.get(camera.id)
+                        status = "active" if (camera.is_active if camera.is_active is not None else True) else "inactive"
+                        
+                        camera_name = str(camera.name).strip() if camera.name and str(camera.name).strip() else "Unnamed Camera"
+                        camera_url = str(camera.url).strip() if camera.url and str(camera.url).strip() else "rtsp://localhost"
+                        
+                        width_val = max(320, min(7680, int(camera.width) if camera.width is not None else 1280))
+                        height_val = max(240, min(4320, int(camera.height) if camera.height is not None else 720))
+                        framerate_val = max(1, min(120, int(camera.framerate) if camera.framerate is not None else 30))
+                        stream_port_val = max(1024, min(65535, int(camera.stream_port) if camera.stream_port is not None else 8081))
+                        stream_quality_val = max(1, min(100, int(camera.stream_quality) if camera.stream_quality is not None else 100))
+                        stream_maxrate_val = max(1, min(120, int(camera.stream_maxrate) if camera.stream_maxrate is not None else 30))
+                        detection_threshold_val = max(0, min(100000, int(camera.detection_threshold) if camera.detection_threshold is not None else 1500))
+                        detection_smart_mask_speed_val = max(0, min(100, int(camera.detection_smart_mask_speed) if camera.detection_smart_mask_speed is not None else 10))
+                        movie_quality_val = max(1, min(100, int(camera.movie_quality) if camera.movie_quality is not None else 100))
+                        snapshot_interval_val = max(0, min(3600, int(camera.snapshot_interval) if camera.snapshot_interval is not None else 0))
+                        
+                        movie_codec_val = "mkv"
+                        if camera.movie_codec:
+                            codec = str(camera.movie_codec).strip()
+                            if ':' in codec:
+                                codec = codec.split(':')[0]
+                            movie_codec_val = codec[:50] if len(codec) > 50 else codec
+                        
+                        target_dir_val = str(camera.target_dir).strip() if camera.target_dir and str(camera.target_dir).strip() else "./motioneye_media"
+                        
+                        camera_dict = {
+                            "id": camera.id,
+                            "name": camera_name,
+                            "url": camera_url,
+                            "is_active": camera.is_active if camera.is_active is not None else True,
+                            "width": width_val,
+                            "height": height_val,
+                            "framerate": framerate_val,
+                            "stream_port": stream_port_val,
+                            "stream_quality": stream_quality_val,
+                            "stream_maxrate": stream_maxrate_val,
+                            "stream_localhost": camera.stream_localhost if camera.stream_localhost is not None else False,
+                            "detection_enabled": camera.detection_enabled if camera.detection_enabled is not None else True,
+                            "detection_threshold": detection_threshold_val,
+                            "detection_smart_mask_speed": detection_smart_mask_speed_val,
+                            "movie_output": camera.movie_output if camera.movie_output is not None else True,
+                            "movie_quality": movie_quality_val,
+                            "movie_codec": movie_codec_val,
+                            "snapshot_interval": snapshot_interval_val,
+                            "target_dir": target_dir_val,
+                            "created_at": camera.created_at,
+                            "stream_url": motioneye_client.get_camera_stream_url(camera.id) if camera.id else None,
+                            "mjpeg_url": motioneye_client.get_camera_mjpeg_url(camera.id) if camera.id else None,
+                            "detection_count": detection_count,
+                            "last_detection": last_detection_time,
+                            "status": status,
+                            "location": None,
+                        }
+                        
+                        try:
+                            camera_response = CameraResponse(**camera_dict)
+                            result.append(camera_response)
+                        except Exception as validation_error:
+                            logger.error(f"Validation error for camera {camera.id}: {validation_error}")
+                            continue
+                    except Exception as e:
+                        logger.error(f"Error processing camera {camera.id}: {e}")
                         continue
-                except Exception as e:
-                    logger.error(f"Error processing camera {camera.id}: {e}")
-                    continue
-            
-            cached_result = [camera.model_dump() for camera in result]
-            set_cached("cameras_list", cached_result, ttl=60)
-            return result
-        except Exception as e:
-            logger.error(f"Error in get_cameras: {e}", exc_info=True)
-            return []
+                
+                cached_result = [camera.model_dump() for camera in result]
+                set_cached("cameras_list", cached_result, ttl=60)
+                return result
+            except Exception as e:
+                logger.error(f"Error in get_cameras: {e}", exc_info=True)
+                return []
     
     @router.get("/api/cameras", response_model=List[CameraResponse])
     @limiter.limit("120/minute")

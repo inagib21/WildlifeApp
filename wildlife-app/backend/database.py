@@ -104,7 +104,8 @@ class AuditLog(Base):
     details = Column(Text, nullable=True)  # JSON string with additional details
     success = Column(Boolean, default=True)  # Whether the action succeeded
     error_message = Column(Text, nullable=True)  # Error message if action failed
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # Link to user who made the change
+    # Note: user_id column removed - not in actual database table
+    # user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # Link to user who made the change
 
 
 class ApiKey(Base):

@@ -4,6 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from typing import Optional, Any
 import os
+import sys
 from dotenv import load_dotenv
 import asyncio
 import logging
@@ -32,11 +33,19 @@ except ImportError:  # pragma: no cover - fallback for direct execution
 
 load_dotenv()
 
-# Configure logging
+# Configure logging with enhanced format
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
+
+# Set debug level for specific modules
+logging.getLogger("wildlife-app.backend").setLevel(logging.DEBUG)
+logging.getLogger("wildlife-app.backend.routers").setLevel(logging.DEBUG)
+logging.getLogger("wildlife-app.backend.services").setLevel(logging.DEBUG)
 
 configure_access_logs()
 

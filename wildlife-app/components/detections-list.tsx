@@ -506,6 +506,11 @@ export function DetectionsList() {
                 if (validImageUrl && validImageUrl.startsWith("/") && !validImageUrl.startsWith("http")) {
                   validImageUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}${validImageUrl}`
                 }
+                
+                // Fallback to placeholder if still invalid
+                if (!validImageUrl || validImageUrl === "/file.svg") {
+                  validImageUrl = "/file.svg"
+                }
                 const commonName = detection.species && detection.species.includes(';') ? detection.species.split(';').pop()?.trim() : detection.species
                 const isSelected = selectedDetections.has(detection.id)
                 return (
@@ -519,8 +524,32 @@ export function DetectionsList() {
                       />
                     </TableCell>
                     <TableCell>
-                      <div className="relative w-24 h-16 cursor-pointer" onClick={() => setSelectedDetection(detection)}>
-                        <Image src={validImageUrl} alt={`Detection ${detection.id}`} fill className="object-cover rounded" />
+                      <div 
+                        className="relative w-24 h-16 cursor-pointer hover:opacity-80 transition-opacity" 
+                        onClick={() => {
+                          console.log('Clicking detection:', detection.id, 'Image URL:', validImageUrl)
+                          setSelectedDetection(detection)
+                        }}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            setSelectedDetection(detection)
+                          }
+                        }}
+                      >
+                        <Image 
+                          src={validImageUrl} 
+                          alt={`Detection ${detection.id}`} 
+                          fill 
+                          className="object-cover rounded"
+                          unoptimized={validImageUrl.startsWith('http://localhost:8001')}
+                          onError={(e) => {
+                            console.error('Image load error for detection', detection.id, 'URL:', validImageUrl)
+                            e.currentTarget.src = '/file.svg'
+                          }}
+                        />
                       </div>
                     </TableCell>
                     <TableCell>{new Date(detection.timestamp).toLocaleString()}</TableCell>

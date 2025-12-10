@@ -223,6 +223,8 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
     @router.post("/api/motioneye/webhook")
     async def motioneye_webhook(request: Request, db: Session = Depends(get_db)):
         """Handle MotionEye webhook notifications for motion detection"""
+        error_details = {}
+        payload = {}
         try:
             payload = await parse_motioneye_payload(request)
             data = payload["raw"]
@@ -300,7 +302,12 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
             # MotionEye stores files in /var/lib/motioneye inside the container
             # We need to map this to our local motioneye_media directory
             # Get the absolute path to the wildlife-app directory
-            wildlife_app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            # __file__ is: wildlife-app/backend/routers/webhooks.py
+            # We need: wildlife-app/
+            current_file = os.path.abspath(__file__)  # .../wildlife-app/backend/routers/webhooks.py
+            routers_dir = os.path.dirname(current_file)  # .../wildlife-app/backend/routers
+            backend_dir = os.path.dirname(routers_dir)  # .../wildlife-app/backend
+            wildlife_app_dir = os.path.dirname(backend_dir)  # .../wildlife-app
             
             # Extract the relative path from MotionEye's path
             # MotionEye sends: /var/lib/motioneye/Camera1/2025-06-26/13-57-02.jpg
