@@ -77,21 +77,21 @@ export const getCameras = async (useCache: boolean = true) => {
     return response.data
   } catch (error: any) {
     ApiDebugger.logError(error, 'getCameras')
-    // If backend is offline, return empty array instead of throwing
+    // If backend is offline, return empty array gracefully
     if (isBackendOffline(error)) {
       console.warn('Backend is offline - returning empty cameras array')
       return []
     }
-    // For other errors, still throw
+    
+    // For all other errors, return empty array (consistent with getDetections, getDetectionsCount, etc.)
+    console.error('Error fetching cameras:', error)
     if (error.response) {
-      const httpError = new Error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
-      console.error(httpError.message)
-      throw httpError
+      console.error(`Backend returned error: ${error.response.status} - ${error.response.statusText}`)
+    } else {
+      console.error('Unknown error:', error.message || error)
     }
-    // For unknown errors, still throw but with a generic message
-    const unknownError = new Error(`Failed to fetch cameras: ${error.message || 'Unknown error'}`)
-    console.error(unknownError.message)
-    throw unknownError
+    
+    return []
   }
 }
 
