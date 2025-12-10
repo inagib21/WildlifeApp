@@ -488,8 +488,34 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                 timestamp=detection_timestamp
             )
             
+            # Extract basic detection info for fallback
+            basic_species = "Unknown"
+            basic_confidence = 0.0
+            if predictions.get("predictions") and len(predictions["predictions"]) > 0:
+                top_pred = predictions["predictions"][0]
+                basic_species = top_pred.get("prediction", "Unknown")
+                basic_confidence = float(top_pred.get("prediction_score", 0.0))
+            
             # Check if detection should be saved
             should_save = smart_processor.should_save_detection(analysis)
+            
+            # Log detection analysis for debugging
+            logger.info(f"🔍 Detection analysis - Species: {analysis.get('species', 'Unknown')}, Confidence: {analysis.get('confidence', 0.0):.3f}, Should save: {should_save}, Quality: {analysis.get('quality', 'unknown')}")
+            
+            # Fallback: If smart detection says don't save, but we have a reasonable prediction, save it anyway
+            # This ensures we don't lose detections due to overly strict filtering
+            if not should_save and basic_confidence >= 0.15:
+                logger.info(f"⚠️ Smart detection filtered detection, but using fallback (confidence: {basic_confidence:.3f}, species: {basic_species})")
+                should_save = True
+                # Use basic detection data instead of smart detection
+                analysis = {
+                    "species": basic_species,
+                    "confidence": basic_confidence,
+                    "quality": "fallback",
+                    "should_save": True,
+                    "should_notify": basic_confidence >= 0.7,
+                    "all_predictions": predictions.get("predictions", [])[:5] if predictions.get("predictions") else []
+                }
             
             if "error" in analysis:
                 logger.warning("Smart detection analysis error: %s", analysis.get("error", "Unknown error"))
@@ -501,16 +527,37 @@ def setup_webhooks_router(limiter: Limiter, get_db) -> APIRouter:
                     timestamp=detection_timestamp
                 )
             elif not should_save:
-                logger.info("Skipping detection save: confidence too low or quality check failed (confidence: %.2f, species: %s)", 
-                           analysis.get("confidence", 0.0),
-                           analysis.get("species", "Unknown"))
+                confidence = analysis.get("confidence", 0.0)
+                species = analysis.get("species", "Unknown")
+                logger.info("⚠️ Skipping detection save: confidence too low (confidence: %.3f, species: %s, min_required: %.2f)", 
+                           confidence,
+                           species,
+                           smart_processor.min_confidence_to_save)
+                # Log to audit for tracking filtered detections
+                log_audit_event(
+                    db=db,
+                    request=request,
+                    action="WEBHOOK_FILTERED",
+                    resource_type="detection",
+                    resource_id=camera_id,
+                    details={
+                        "reason": "low_confidence",
+                        "confidence": confidence,
+                        "species": species,
+                        "min_confidence_required": smart_processor.min_confidence_to_save,
+                        "file_path": local_file_path
+                    },
+                    success=False,
+                    error_message=f"Detection filtered: confidence {confidence:.3f} below threshold {smart_processor.min_confidence_to_save}"
+                )
                 # Don't save this detection - return early
                 return {
                     "status": "skipped",
                     "message": "Detection not saved (low confidence or quality check failed)",
                     "reason": "should_not_save",
-                    "confidence": analysis.get("confidence", 0.0),
-                    "species": analysis.get("species", "Unknown")
+                    "confidence": confidence,
+                    "species": species,
+                    "min_confidence_required": smart_processor.min_confidence_to_save
                 }
             else:
                 # Use smart detection results

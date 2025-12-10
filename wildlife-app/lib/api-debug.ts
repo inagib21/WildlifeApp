@@ -64,6 +64,24 @@ export class ApiDebugger {
     console.groupEnd()
   }
 
+  private static hasMeaningfulContent(obj: any): boolean {
+    if (!obj || typeof obj !== 'object') return false
+    if (Array.isArray(obj)) return obj.length > 0
+    const keys = Object.keys(obj)
+    if (keys.length === 0) return false
+    // Check if at least one key has a non-empty, non-object value, or a non-empty object
+    return keys.some(key => {
+      const val = obj[key]
+      if (val === undefined || val === null) return false
+      // Exclude empty strings
+      if (typeof val === 'string' && val.trim().length === 0) return false
+      if (typeof val === 'object' && !Array.isArray(val)) {
+        return this.hasMeaningfulContent(val) // Recursively check nested objects
+      }
+      return true // Primitive (non-empty) or array
+    })
+  }
+
   static logError(error: AxiosError | Error | unknown, context?: string) {
     try {
       // Handle null, undefined, or empty error objects
@@ -331,7 +349,7 @@ export class ApiDebugger {
       }
       
       // Only log if we have meaningful details after filtering
-      if (Object.keys(filteredDetails).length > 0) {
+      if (this.hasMeaningfulContent(filteredDetails)) {
         console.error('Error Details (extended):', filteredDetails)
       }
     }
@@ -345,13 +363,21 @@ export class ApiDebugger {
       if (error.config?.method) axiosDetails.method = error.config.method
       if (error.config?.baseURL) axiosDetails.baseURL = error.config.baseURL
       if (error.response) {
-        axiosDetails.response = {
-          status: error.response.status,
-          statusText: error.response.statusText,
-          data: error.response.data
+        const responseData: any = {}
+        if (error.response.status !== undefined) responseData.status = error.response.status
+        if (error.response.statusText) responseData.statusText = error.response.statusText
+        if (error.response.data !== undefined && error.response.data !== null) {
+          responseData.data = error.response.data
+        }
+        // Only add response if it has meaningful content
+        if (Object.keys(responseData).length > 0) {
+          axiosDetails.response = responseData
         }
       }
-      if (Object.keys(axiosDetails).length > 0) {
+      // Only log if we have meaningful content - double check to prevent empty objects
+      const hasKeys = Object.keys(axiosDetails).length > 0
+      const hasContent = hasKeys && this.hasMeaningfulContent(axiosDetails)
+      if (hasContent) {
         console.error('Axios Error Details:', axiosDetails)
       }
     } else if (error && error instanceof Error) {
@@ -359,7 +385,8 @@ export class ApiDebugger {
       if (error.name) errorObj.name = error.name
       if (error.message) errorObj.message = error.message
       if (error.stack) errorObj.stack = error.stack
-      if (Object.keys(errorObj).length > 0) {
+      // Only log if we have meaningful content
+      if (Object.keys(errorObj).length > 0 && this.hasMeaningfulContent(errorObj)) {
         console.error('Error Object:', errorObj)
       }
     } else if (error !== null && error !== undefined) {

@@ -17,8 +17,8 @@ class SmartDetectionProcessor:
         self.high_confidence_threshold = 0.7
         self.medium_confidence_threshold = 0.5
         self.low_confidence_threshold = 0.3
-        # Minimum confidence to save detection
-        self.min_confidence_to_save = 0.2
+        # Minimum confidence to save detection (lowered to ensure more detections are saved)
+        self.min_confidence_to_save = 0.15
         
         # Species name normalization rules
         self.species_aliases = {
@@ -83,11 +83,17 @@ class SmartDetectionProcessor:
             }
         
         if not predictions.get("predictions"):
+            # If no predictions, still return a valid analysis structure
+            # but mark it as low confidence so it can be saved if needed
+            logger.warning("No predictions returned from SpeciesNet, using fallback")
             return {
-                "error": "No predictions returned",
-                "confidence": 0.0,
                 "species": "Unknown",
-                "quality": "no_predictions"
+                "confidence": 0.1,  # Very low but above absolute zero
+                "quality": "no_predictions",
+                "should_save": False,  # Will be overridden by fallback in webhook if needed
+                "should_notify": False,
+                "all_predictions": [],
+                "error": "No predictions returned"
             }
         
         preds = predictions["predictions"]
@@ -265,17 +271,24 @@ class SmartDetectionProcessor:
     def should_save_detection(self, analysis: Dict[str, Any]) -> bool:
         """Determine if detection should be saved to database"""
         if "error" in analysis:
+            logger.debug("Not saving detection: error in analysis")
             return False  # Don't save errors
         
         # Check minimum confidence threshold
-        if not analysis.get("should_save", False):
-            return False
+        confidence = analysis.get("confidence", 0.0)
+        species = analysis.get("species", "Unknown")
         
-        # Don't save if species is Unknown and confidence is very low
-        if analysis["species"] == "Unknown" and analysis["confidence"] < 0.3:
-            return False
+        # Always save if confidence meets minimum threshold
+        if confidence >= self.min_confidence_to_save:
+            # Only filter out Unknown species if confidence is very low (< 0.2)
+            if species == "Unknown" and confidence < 0.2:
+                logger.debug(f"Not saving detection: Unknown species with very low confidence ({confidence:.3f})")
+                return False
+            logger.debug(f"Saving detection: {species} with confidence {confidence:.3f}")
+            return True
         
-        return True
+        logger.debug(f"Not saving detection: confidence {confidence:.3f} below minimum {self.min_confidence_to_save}")
+        return False
     
     def get_detection_data(self, analysis: Dict[str, Any], image_path: str, camera_id: int, timestamp: datetime) -> Dict[str, Any]:
         """Get detection data dictionary for database insertion"""
