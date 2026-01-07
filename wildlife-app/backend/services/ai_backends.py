@@ -776,8 +776,8 @@ class AIBackendManager:
         return self.backends.get(name)
     
     def list_backends(self) -> List[Dict[str, Any]]:
-        """List all available backends"""
-        return [
+        """List all available backends (always includes SpeciesNet even if unavailable)"""
+        backends_list = [
             {
                 "name": name,
                 "display_name": backend.get_name(),
@@ -785,15 +785,58 @@ class AIBackendManager:
             }
             for name, backend in self.backends.items()
         ]
+        
+        # Always include SpeciesNet in the list, even if not available
+        # This ensures it shows up in the UI
+        has_speciesnet = any(b["name"] == "speciesnet" for b in backends_list)
+        if not has_speciesnet:
+            speciesnet_backend = SpeciesNetBackend()
+            backends_list.append({
+                "name": "speciesnet",
+                "display_name": speciesnet_backend.get_name(),
+                "available": speciesnet_backend.is_available()
+            })
+        
+        return backends_list
     
     def compare_models(self, image_path: str) -> Dict[str, Any]:
         """Run all available backends on a single image for comparison"""
         results = {}
         
-        # Run individual models
+        # Always include SpeciesNet in comparison, even if not available at startup
+        # This ensures it shows up in the test models page
+        speciesnet_backend = None
+        if "speciesnet" in self.backends:
+            speciesnet_backend = self.backends["speciesnet"]
+        else:
+            # Try to initialize SpeciesNet even if it wasn't available at startup
+            speciesnet_backend = SpeciesNetBackend()
+        
+        # Always run SpeciesNet (will show error if unavailable)
+        start_time = time.time()
+        try:
+            pred = speciesnet_backend.predict(image_path)
+            duration = time.time() - start_time
+            results["speciesnet"] = {
+                "name": speciesnet_backend.get_name(),
+                "predictions": pred.get("predictions", []),
+                "confidence": pred.get("confidence", 0),
+                "inference_time_ms": round(duration * 1000, 2), # ms
+                "error": pred.get("error")
+            }
+        except Exception as e:
+            results["speciesnet"] = {
+                "error": str(e), 
+                "name": speciesnet_backend.get_name(),
+                "predictions": [],
+                "confidence": 0,
+                "inference_time_ms": 0
+            }
+        
+        # Run other individual models
         for name, backend in self.backends.items():
-            if name == "ensemble": 
-                continue # Skip ensemble in the raw list, we'll run it separately or let the user deduce
+            if name == "ensemble" or name == "speciesnet": 
+                continue # Skip ensemble and speciesnet (already handled above)
             
             start_time = time.time()
             try:
