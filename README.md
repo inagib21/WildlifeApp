@@ -259,10 +259,31 @@ See `scripts/README.md` for detailed documentation.
 - **Manual Camera Setup:** If you need to configure ESP32-CAM modules manually or set up custom camera hardware, refer to the [ESP32SETUP repository](https://github.com/inagib21/ESP32SETUP) for detailed PlatformIO setup instructions, hardware connections, and firmware configuration.
 - **Webhook Configuration:** MotionEye webhooks are configured to use `host.docker.internal:8001` for Docker compatibility
 
-## Wildlife Classification
-- **SpeciesNet** (from [google/cameratrapai](https://github.com/google/cameratrapai)) is used for AI-based species classification.
-- The backend calls a local SpeciesNet server for predictions.
-- For more on SpeciesNet, see the [official repo](https://github.com/google/cameratrapai).
+## Wildlife Classification & AI Backends
+
+The system supports multiple AI backends for wildlife detection:
+
+- **YOLOv11** (Latest) - Fastest and most accurate object detection model
+- **YOLOv8** - High-performance object detection
+- **CLIP** (OpenAI) - Zero-shot classification for rare species
+- **ViT** (Google) - Vision Transformer for general image classification
+- **SpeciesNet** (YOLOv5) - Specialized camera trap classification from [google/cameratrapai](https://github.com/google/cameratrapai)
+- **Ensemble** - Combines multiple models for improved accuracy
+
+**Features:**
+- Automatic backend selection and fallback
+- Real-time performance metrics tracking
+- Behavioral analysis (eating, drinking, running, resting, etc.)
+- Video frame extraction for video analysis
+- Model comparison testing interface
+
+**Test Models:**
+- Interactive Test Models page (`/model-test`) with sample media gallery
+- Compare all AI backends on the same image/video
+- Download sample wildlife images and videos for testing
+- See performance metrics and behavioral analysis
+
+See [`wildlife-app/AI_MODELS_GUIDE.md`](wildlife-app/AI_MODELS_GUIDE.md) and [`wildlife-app/UPGRADE_AI_GUIDE.md`](wildlife-app/UPGRADE_AI_GUIDE.md) for detailed documentation.
 
 ## Audit Logging
 
