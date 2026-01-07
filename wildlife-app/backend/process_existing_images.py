@@ -48,15 +48,15 @@ try:
     
     if unprocessed:
         print(f"\nProcessing first 10 images as a test...")
-        from main import speciesnet_processor
+        from services.ai_backends import ai_backend_manager
         
         processed = 0
         for image_path in unprocessed[:10]:
             try:
                 print(f"\nProcessing: {os.path.basename(image_path)}")
                 
-                # Process with SpeciesNet
-                predictions = speciesnet_processor.process_image(image_path)
+                # Process with AI Backend Manager
+                predictions = ai_backend_manager.predict(image_path)
                 
                 if "error" in predictions:
                     print(f"  SpeciesNet error: {predictions['error']}")

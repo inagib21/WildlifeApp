@@ -20,11 +20,13 @@ try:
     from ..models import DetectionResponse, DetectionCreate
     from ..utils.audit import log_audit_event
     from ..services.events import get_event_manager
+    from ..services.species_info import species_info_service
 except ImportError:
     from database import engine, Camera, Detection
     from models import DetectionResponse, DetectionCreate
     from utils.audit import log_audit_event
     from services.events import get_event_manager
+    from services.species_info import species_info_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -149,6 +151,17 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
                         confidence_val = float(detection.confidence) if detection.confidence is not None else 0.0
                         confidence_val = max(0.0, min(1.0, confidence_val))  # Clamp to 0.0-1.0
                         
+                        # Get species information
+                        species_info = None
+                        if species_val and species_val != "Unknown":
+                            try:
+                                species_info_dict = species_info_service.get_species_info(species_val)
+                                if species_info_dict:
+                                    from models import SpeciesInfoResponse
+                                    species_info = SpeciesInfoResponse(**species_info_dict)
+                            except Exception as e:
+                                logger.debug(f"Error getting species info for {species_val}: {e}")
+                        
                         # Normalize image_path to ensure it passes validation
                         # The validator requires either a valid image extension or a temp path
                         if detection.image_path and str(detection.image_path).strip():
@@ -206,7 +219,8 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
                             "prediction_score": float(detection.prediction_score) if detection.prediction_score is not None else None,
                             "detections_json": detections_json_val,
                             "media_url": None,  # Will be set below
-                            "camera_name": str(camera_name)  # Add camera name to response
+                            "camera_name": str(camera_name),  # Add camera name to response
+                            "species_info": species_info  # Add species information
                         }
                 
                         # Generate media URL from image path

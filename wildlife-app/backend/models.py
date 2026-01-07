@@ -1,6 +1,6 @@
 """Pydantic models for API request/response validation"""
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 import re
 
@@ -160,6 +160,43 @@ class DetectionBase(BaseModel):
 
 class DetectionCreate(DetectionBase):
     pass
+
+
+class SpeciesInfoResponse(BaseModel):
+    """Species information response"""
+    common_name: Optional[str] = None
+    scientific_name: Optional[str] = None
+    description: Optional[str] = None
+    habitat: Optional[str] = None
+    behavior: Optional[str] = None
+    diet: Optional[str] = None
+    size: Optional[str] = None
+    weight: Optional[str] = None
+    conservation_status: Optional[str] = None
+    activity_pattern: Optional[str] = None
+    geographic_range: Optional[str] = None
+    interesting_facts: Optional[List[str]] = None
+    image_url: Optional[str] = None
+
+
+class SpeciesInfoResponse(BaseModel):
+    """Species information response"""
+    common_name: Optional[str] = None
+    scientific_name: Optional[str] = None
+    description: Optional[str] = None
+    habitat: Optional[str] = None
+    behavior: Optional[str] = None
+    diet: Optional[str] = None
+    size: Optional[str] = None
+    weight: Optional[str] = None
+    conservation_status: Optional[str] = None
+    activity_pattern: Optional[str] = None
+    geographic_range: Optional[str] = None
+    interesting_facts: Optional[List[str]] = None
+    image_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
 
 
 class DetectionResponse(DetectionBase):

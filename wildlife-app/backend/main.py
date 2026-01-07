@@ -447,6 +447,8 @@ try:
     from routers.analytics import setup_analytics_router
     from routers.auth import setup_auth_router
     from routers.audit import setup_audit_router
+    from routers.species import setup_species_router
+    from routers.ai import router as ai_router
 except ImportError:
     from .routers.system import setup_system_router
     from .routers.cameras import setup_cameras_router
@@ -461,6 +463,8 @@ except ImportError:
     from .routers.analytics import setup_analytics_router
     from .routers.auth import setup_auth_router
     from .routers.audit import setup_audit_router
+    from .routers.species import setup_species_router
+    from .routers.ai import router as ai_router
 
 # Setup and include routers
 system_router = setup_system_router(limiter, get_db)
@@ -476,6 +480,7 @@ debug_router = setup_debug_router(get_db)
 analytics_router = setup_analytics_router(limiter, get_db)
 auth_router = setup_auth_router(limiter, get_db)
 audit_router = setup_audit_router(limiter, get_db)
+species_router = setup_species_router(limiter, get_db)
 
 app.include_router(system_router)
 app.include_router(cameras_router)
@@ -490,6 +495,9 @@ app.include_router(debug_router)
 app.include_router(analytics_router)
 app.include_router(auth_router)
 app.include_router(audit_router)
+app.include_router(audit_router)
+app.include_router(species_router)
+app.include_router(ai_router)
 
 # Initialize scheduled tasks on startup
 try:

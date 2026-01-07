@@ -21,6 +21,12 @@ DATABASE_URL = os.getenv(
 MOTIONEYE_URL = os.getenv("MOTIONEYE_URL", "http://localhost:8765")
 SPECIESNET_URL = os.getenv("SPECIESNET_URL", "http://localhost:8000")
 
+# AI Backend Configuration
+AI_BACKEND = os.getenv("AI_BACKEND", "ensemble")  # Options: speciesnet, yolov11, yolov8, clip, ensemble
+YOLOV11_MODEL_PATH = os.getenv("YOLOV11_MODEL_PATH", "yolo11n.pt")
+YOLOV8_MODEL_PATH = os.getenv("YOLOV8_MODEL_PATH", "yolov8n.pt")
+VIT_MODEL_NAME = os.getenv("VIT_MODEL_NAME", "google/vit-base-patch16-224")
+
 # Camera authentication credentials
 THINGINO_CAMERA_USERNAME = os.getenv("THINGINO_CAMERA_USERNAME", "root")
 THINGINO_CAMERA_PASSWORD = os.getenv("THINGINO_CAMERA_PASSWORD", "ismart12")

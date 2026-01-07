@@ -13,6 +13,10 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
 
 ## Features
 - Real-time wildlife detection and classification from camera trap images
+- **Multiple AI Backends:** YOLOv11 (latest), YOLOv8, CLIP, ViT, SpeciesNet, and Ensemble model
+- **AI Model Testing:** Interactive Test Models page with sample media gallery and real-time comparison
+- **Behavioral Analysis:** Detects animal behaviors (eating, drinking, running, resting) across AI models
+- **Performance Metrics:** Track inference time, confidence scores, and success rates for each AI backend
 - FastAPI backend with REST and analytics endpoints
 - Next.js frontend dashboard (React, TypeScript, Tailwind)
 - PostgreSQL with columnstore analytics (pg_mooncake)
@@ -31,6 +35,8 @@ A full-stack wildlife detection and analytics platform for camera trap images, u
 - Interactive API documentation (Swagger/ReDoc)
 - Robust API validation with error handling (prevents crashes from invalid data)
 - Webhook support for external integrations
+- **Video Processing:** Automatic frame extraction from videos for AI analysis
+- **Test Media Download:** Easy download of sample images and videos for testing
 - **Enhanced Error Detection:** Automatic error categorization, detailed logging, and troubleshooting suggestions
 - **Diagnostic Tools:** Built-in diagnostic scripts for system health and error analysis
 - **ESP32 Webcam Support:** Easy integration scripts for ESP32-based cameras
@@ -169,7 +175,19 @@ See `wildlife-app/CAMERA_DETECTION_TROUBLESHOOTING.md` for detailed troubleshoot
 
 ## Recent Improvements
 
-### Error Detection & Diagnostics (Latest)
+### AI Backends & Model Testing (Latest)
+- **Multiple AI Backends:** Added YOLOv11, YOLOv8, CLIP, ViT support alongside SpeciesNet
+- **Ensemble Model:** Combines predictions from multiple backends for improved accuracy
+- **Test Models Page:** Interactive UI for testing and comparing AI models
+  - Sample media gallery with downloadable test images and videos
+  - Real-time model comparison with performance metrics
+  - Behavioral analysis showing animal activities detected by models
+- **Performance Metrics:** Track inference time, confidence, and success rates per backend
+- **Video Support:** Automatic frame extraction from videos for AI analysis
+- **Behavioral Detection:** Identifies animal behaviors (eating, drinking, running, resting) across models
+- See [`wildlife-app/AI_MODELS_GUIDE.md`](wildlife-app/AI_MODELS_GUIDE.md) for details
+
+### Error Detection & Diagnostics
 - **Enhanced Error Detection System:** Comprehensive error categorization and tracking
   - Automatic error categorization (file_path_error, database_error, speciesnet_error, etc.)
   - Detailed error logging with full context and troubleshooting suggestions

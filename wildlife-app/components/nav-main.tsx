@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
-import { IconDashboard, IconCamera, IconAlertCircle, IconSettings, IconPlus, IconShield, IconFileText, IconChartBar } from "@tabler/icons-react"
+import { IconDashboard, IconCamera, IconAlertCircle, IconSettings, IconPlus, IconShield, IconFileText, IconChartBar, IconFlask } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
 
 const items = [
@@ -38,6 +38,11 @@ const items = [
     icon: IconChartBar,
   },
   {
+    title: "Test Models",
+    href: "/model-test",
+    icon: IconFlask,
+  },
+  {
     title: "Settings",
     href: "/config",
     icon: IconSettings,
@@ -58,7 +63,7 @@ export function NavMain() {
       {items.map((item, index) => {
         // Only check pathname match after component is mounted to avoid hydration mismatch
         const isActive = mounted && pathname === item.href
-        
+
         return (
           <Link
             key={index}

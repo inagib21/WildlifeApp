@@ -27,6 +27,11 @@ psutil>=5.9.0
 # Wildlife classification
 speciesnet[server]
 
+# Optional: Advanced AI models (uncomment to enable)
+ultralytics>=8.0.0  # For YOLOv8/YOLOv10/YOLOv11 support
+transformers>=4.30.0  # For CLIP support
+torch>=2.0.0  # Required for CLIP and advanced models
+
 # Data validation (included with FastAPI but explicit for clarity)
 pydantic>=2.0.0
 
