@@ -8,7 +8,7 @@ import os
 try:
     from ..services.thingino import ThinginoService
     from ..services.motioneye_webhook_handler import MotionEyeWebhookHandler
-except ImportError:
+except (ImportError, ValueError):
     from services.thingino import ThinginoService
     from services.motioneye_webhook_handler import MotionEyeWebhookHandler
 
