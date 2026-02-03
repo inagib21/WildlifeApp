@@ -65,7 +65,13 @@ def setup_backups_router(limiter: Limiter, get_db) -> APIRouter:
             for backup in backups:
                 info = backup_service.get_backup_info(backup)
                 if info:
-                    backup_info.append(info)
+                    backup_info.append({
+                        "filename": info["filename"],
+                        "path": info["path"],
+                        "size_mb": info["size_mb"],
+                        "created_at": info["created"],
+                        "modified_at": info["modified"]
+                    })
             
             return {
                 "backups": backup_info,

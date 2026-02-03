@@ -61,16 +61,19 @@ class SpeciesNetProcessor:
         """Get SpeciesNet server status"""
         try:
             # Increased timeout for SpeciesNet health check (model loading can take time)
-            # 15s connect, 20s read to handle slow startup
-            response = self.session.get(f"{self.server_url}/health", timeout=(15, 20))
+            # 30s connect, 60s read to handle slow startup and model initialization
+            response = self.session.get(f"{self.server_url}/health", timeout=(30, 60))
             if response.status_code == 200:
                 return "running"
             else:
                 return "error"
         except requests.exceptions.Timeout:
-            return "timeout"
-        except Exception:
+            # Timeout is expected if SpeciesNet is starting up - don't treat as error
+            return "starting"  # Changed from "timeout" to "starting" to be more user-friendly
+        except requests.exceptions.ConnectionError:
             return "not_available"
+        except Exception:
+            return "error"
 
 
 # Global SpeciesNet processor instance

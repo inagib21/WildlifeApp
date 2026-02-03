@@ -1,0 +1,15 @@
+{
+  "camera_id": 10,
+  "camera_name": "Camera10",
+  "webhook_command": "curl -X POST http://localhost:8001/api/motioneye/webhook -F file_path=%f -F camera_id=%c",
+  "instructions": [
+    "1. Open MotionEye: http://localhost:8765",
+    "2. Click on camera: Camera10 (ID: 10)",
+    "3. Go to 'Motion Detection' or 'Advanced' settings",
+    "4. Find 'on_picture_save' field",
+    "5. Paste: curl -X POST http://localhost:8001/api/motioneye/webhook -F file_path=%f -F camera_id=%c",
+    "6. Ensure Motion Detection is ON",
+    "7. Ensure Picture Output Motion is ON",
+    "8. Save settings"
+  ]
+}

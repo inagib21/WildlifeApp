@@ -44,13 +44,21 @@ class NotificationService:
         self.smtp_user = SMTP_USER
         self.smtp_password = SMTP_PASSWORD
         self.from_email = NOTIFICATION_EMAIL_FROM
-        self.to_emails = NOTIFICATION_EMAIL_TO.split(',') if NOTIFICATION_EMAIL_TO else []
+        # Safely split email list
+        try:
+            self.to_emails = [email.strip() for email in NOTIFICATION_EMAIL_TO.split(',') if email.strip()] if NOTIFICATION_EMAIL_TO and isinstance(NOTIFICATION_EMAIL_TO, str) else []
+        except (AttributeError, TypeError):
+            self.to_emails = []
         
         # SMS configuration
         self.sms_enabled = SMS_ENABLED and TWILIO_AVAILABLE
         self.twilio_client = None
         self.twilio_phone_number = TWILIO_PHONE_NUMBER
-        self.sms_phone_numbers = [num.strip() for num in SMS_PHONE_NUMBERS.split(',') if num.strip()] if SMS_PHONE_NUMBERS else []
+        # Safely split SMS phone numbers
+        try:
+            self.sms_phone_numbers = [num.strip() for num in SMS_PHONE_NUMBERS.split(',') if num.strip()] if SMS_PHONE_NUMBERS and isinstance(SMS_PHONE_NUMBERS, str) else []
+        except (AttributeError, TypeError):
+            self.sms_phone_numbers = []
         
         if self.sms_enabled:
             if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
@@ -121,10 +129,17 @@ class NotificationService:
             msg['From'] = self.from_email
             msg['To'] = ', '.join(self.to_emails)
             
-            # Email body
+            # Email body - handle None values safely
             camera_display = camera_name or f"Camera {camera_id}"
-            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            confidence_percent = round(confidence * 100, 1)
+            try:
+                timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            except (AttributeError, TypeError):
+                timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            try:
+                confidence_percent = round(float(confidence) * 100, 1) if confidence is not None else 0.0
+            except (TypeError, ValueError):
+                confidence_percent = 0.0
             
             text_content = f"""
 Wildlife Detection Alert
@@ -234,8 +249,15 @@ View in dashboard: http://localhost:3000/detections
         
         try:
             camera_display = camera_name or f"Camera {camera_id}"
-            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            confidence_percent = round(confidence * 100, 1)
+            try:
+                timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            except (AttributeError, TypeError):
+                timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            try:
+                confidence_percent = round(float(confidence) * 100, 1) if confidence is not None else 0.0
+            except (TypeError, ValueError):
+                confidence_percent = 0.0
             
             # SMS message (max 1600 chars, but keep it short)
             message = f"🦌 Wildlife Alert: {species} ({confidence_percent}%) detected on {camera_display} at {timestamp_str}. ID: {detection_id or 'N/A'}"

@@ -12,7 +12,7 @@ except ImportError:
 class MotionEyeClient:
     """Client for interacting with MotionEye API"""
     
-    def __init__(self, base_url: str = MOTIONEYE_URL):
+    def __init__(self, base_url: str = MOTIONEYE_URL, username: str = None, password: str = None):
         self.base_url = base_url
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
@@ -22,6 +22,42 @@ class MotionEyeClient:
         )
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
+        
+        # Try to authenticate if credentials provided
+        if username and password:
+            self._authenticate(username, password)
+    
+    def _authenticate(self, username: str, password: str) -> bool:
+        """Authenticate with MotionEye to get session cookie"""
+        try:
+            # MotionEye uses /login endpoint with form data
+            # First, get the main page to establish session
+            self.session.get(f"{self.base_url}/", timeout=(10, 15))
+            
+            # Then login with form data
+            response = self.session.post(
+                f"{self.base_url}/login",
+                data={"username": username, "password": password},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=(10, 15),
+                allow_redirects=True
+            )
+            
+            # Check if we got a successful response or redirect
+            if response.status_code in [200, 302]:
+                # Verify by trying to access a protected endpoint
+                test_response = self.session.get(f"{self.base_url}/config/list", timeout=(10, 15))
+                if test_response.status_code == 200:
+                    logging.info("MotionEye authentication successful")
+                    return True
+                else:
+                    logging.warning(f"MotionEye auth verification failed: {test_response.status_code}")
+            else:
+                logging.warning(f"MotionEye authentication failed: {response.status_code} - {response.text[:200]}")
+            return False
+        except Exception as e:
+            logging.warning(f"MotionEye authentication error: {e}")
+            return False
     
     def get_cameras(self) -> List[Dict[str, Any]]:
         """Get list of cameras from MotionEye"""
@@ -87,9 +123,11 @@ class MotionEyeClient:
             response = self.session.get(f"{self.base_url}/config/{camera_id}/get", timeout=(10, 15))
             if response.status_code == 200:
                 return response.json()
+            else:
+                logging.warning(f"MotionEye API returned status {response.status_code} for camera {camera_id}: {response.text[:200]}")
             return None
         except Exception as e:
-            logging.error(f"Error getting camera config from MotionEye: {e}")
+            logging.error(f"Error getting camera config from MotionEye: {e}", exc_info=True)
             return None
     
     def set_motion_settings(self, camera_id: int, motion_settings: Dict[str, Any]) -> bool:

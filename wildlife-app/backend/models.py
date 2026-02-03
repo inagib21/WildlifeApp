@@ -1,6 +1,6 @@
 """Pydantic models for API request/response validation"""
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 import re
 
@@ -24,6 +24,14 @@ class CameraBase(BaseModel):
     movie_codec: str = Field("mkv", max_length=50, description="Movie codec")
     snapshot_interval: int = Field(0, ge=0, le=3600, description="Snapshot interval in seconds")
     target_dir: str = Field("./motioneye_media", max_length=500, description="Target directory for media")
+    # Location fields
+    latitude: Optional[float] = Field(None, ge=-90.0, le=90.0, description="Camera latitude (-90 to 90)")
+    longitude: Optional[float] = Field(None, ge=-180.0, le=180.0, description="Camera longitude (-180 to 180)")
+    address: Optional[str] = Field(None, max_length=500, description="Camera address/location")
+    # Geofencing fields (per-camera)
+    geofence_enabled: Optional[bool] = Field(False, description="Enable geofencing for this camera")
+    geofence_type: Optional[str] = Field(None, description="Geofence type: polygon, circle, or bounds")
+    geofence_data: Optional[Dict[str, Any]] = Field(None, description="Geofence configuration data (JSON)")
     
     @field_validator('name')
     @classmethod
@@ -40,13 +48,9 @@ class CameraBase(BaseModel):
         if not v or not v.strip():
             raise ValueError('Camera URL cannot be empty')
         v = v.strip()
-        # Check for valid URL schemes
-        valid_schemes = ['rtsp://', 'http://', 'https://', 'rtmp://', 'file://']
-        if not any(v.lower().startswith(scheme) for scheme in valid_schemes):
-            raise ValueError(f'URL must start with one of: {", ".join(valid_schemes)}')
-        # Check for path traversal attempts
-        if '..' in v or '//' in v.replace('://', '').replace('//', ''):
-            raise ValueError('Invalid URL format - path traversal detected')
+        # Allow http, https, rtsp, rtmp, or file:// URLs
+        if not v.startswith(('http://', 'https://', 'rtsp://', 'rtmp://', 'file://')):
+            raise ValueError('Camera URL must start with http://, https://, rtsp://, rtmp://, or file://')
         return v
     
     @field_validator('movie_codec')
@@ -81,6 +85,13 @@ class CameraBase(BaseModel):
         """Validate that resolution is reasonable"""
         width = self.width
         height = self.height
+        
+        # Check dimensions are reasonable
+        if width < 320 or width > 7680:
+            raise ValueError(f'Width must be between 320 and 7680, got {width}')
+        if height < 240 or height > 4320:
+            raise ValueError(f'Height must be between 240 and 4320, got {height}')
+        
         # Check aspect ratio is reasonable (between 1:3 and 3:1)
         aspect_ratio = width / height if height > 0 else 1
         if aspect_ratio < 0.33 or aspect_ratio > 3.0:
@@ -94,13 +105,16 @@ class CameraCreate(CameraBase):
 
 class CameraResponse(CameraBase):
     id: int
-    created_at: datetime
+
     stream_url: Optional[str] = None
     mjpeg_url: Optional[str] = None
     detection_count: Optional[int] = None
     last_detection: Optional[str] = None
     status: Optional[str] = None
-    location: Optional[str] = None
+    location: Optional[str] = None  # Legacy field, use address instead
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    address: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -117,6 +131,14 @@ class DetectionBase(BaseModel):
     image_quality: Optional[int] = Field(None, ge=0, le=100, description="Image quality (0-100)")
     prediction_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="Prediction score (0.0-1.0)")
     detections_json: Optional[str] = Field(None, max_length=10000, description="Full detection data as JSON")
+    # Audio support
+    audio_path: Optional[str] = Field(None, max_length=1000, description="Path to audio file")
+    # Video support
+    video_path: Optional[str] = Field(None, max_length=1000, description="Path to video file")
+    # Sensor data from ESP32
+    temperature: Optional[float] = Field(None, ge=-50.0, le=70.0, description="Temperature in Celsius")
+    humidity: Optional[float] = Field(None, ge=0.0, le=100.0, description="Humidity in percentage")
+    pressure: Optional[float] = Field(None, ge=0.0, le=1500.0, description="Atmospheric pressure in hPa")
     
     @field_validator('species')
     @classmethod
@@ -138,8 +160,8 @@ class DetectionBase(BaseModel):
         valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
         if not any(v.lower().endswith(ext) for ext in valid_extensions):
             # Allow paths without extension for temporary files
-            if not v.startswith('/tmp') and not v.startswith('C:\\') and 'temp' not in v.lower():
-                raise ValueError(f'Image path should have a valid image extension: {", ".join(valid_extensions)}')
+            if not any(c in v for c in ['/', '\\']):
+                raise ValueError(f'Image path must have a valid extension or be a path. Valid extensions: {", ".join(valid_extensions)}')
         # Prevent path traversal
         if '..' in v:
             raise ValueError('Image path cannot contain path traversal (..)')
@@ -178,22 +200,18 @@ class SpeciesInfoResponse(BaseModel):
     interesting_facts: Optional[List[str]] = None
     image_url: Optional[str] = None
 
+    class Config:
+        from_attributes = True
 
-class SpeciesInfoResponse(BaseModel):
-    """Species information response"""
-    common_name: Optional[str] = None
-    scientific_name: Optional[str] = None
-    description: Optional[str] = None
-    habitat: Optional[str] = None
-    behavior: Optional[str] = None
-    diet: Optional[str] = None
-    size: Optional[str] = None
-    weight: Optional[str] = None
-    conservation_status: Optional[str] = None
-    activity_pattern: Optional[str] = None
-    geographic_range: Optional[str] = None
-    interesting_facts: Optional[List[str]] = None
-    image_url: Optional[str] = None
+
+class RecognizedFaceResponse(BaseModel):
+    """Recognized face information in detection response"""
+    id: int
+    name: str
+    confidence: float
+    known_face_id: Optional[int] = None
+    recognition_confidence: float
+    face_location: Dict[str, int]
 
     class Config:
         from_attributes = True
@@ -204,7 +222,10 @@ class DetectionResponse(DetectionBase):
     timestamp: datetime
     full_taxonomy: Optional[str] = None  # Add full taxonomy field
     media_url: Optional[str] = None
+    video_url: Optional[str] = None  # URL for video file
+    thumbnail_url: Optional[str] = None  # URL for thumbnail image
     camera_name: str
+    recognized_faces: Optional[List[RecognizedFaceResponse]] = Field(default_factory=list, description="Recognized faces in this detection")
 
     class Config:
         from_attributes = True
@@ -215,11 +236,8 @@ class MotionSettings(BaseModel):
     motion_detection: Optional[bool] = Field(None, description="Enable motion detection")
     motion_threshold: Optional[int] = Field(None, ge=0, le=100000, description="Motion threshold")
     motion_mask: Optional[str] = Field(None, max_length=10000, description="Motion mask")
-    motion_gap: Optional[int] = Field(None, ge=0, le=3600, description="Motion gap in seconds")
-    motion_event_gap: Optional[int] = Field(None, ge=0, le=3600, description="Motion event gap in seconds")
-    motion_pre_capture: Optional[int] = Field(None, ge=0, le=60, description="Pre-capture frames")
-    motion_post_capture: Optional[int] = Field(None, ge=0, le=60, description="Post-capture frames")
-    noise_level: Optional[int] = Field(None, ge=0, le=100, description="Noise level")
+    motion_smart_mask: Optional[bool] = Field(None, description="Enable smart mask")
+    motion_noise_level: Optional[int] = Field(None, ge=0, le=100, description="Noise level")
     lightswitch_percent: Optional[int] = Field(None, ge=0, le=100, description="Lightswitch percent")
     despeckle_filter: Optional[str] = Field(None, max_length=50, description="Despeckle filter")
     minimum_motion_frames: Optional[int] = Field(None, ge=1, le=100, description="Minimum motion frames")
@@ -235,16 +253,16 @@ class MotionSettings(BaseModel):
 
 
 class AuditLogResponse(BaseModel):
-    """Response model for audit log entries"""
+    """Audit log response model"""
     id: int
     timestamp: datetime
     action: str
-    resource_type: str
+    resource_type: Optional[str] = None
     resource_id: Optional[int] = None
-    user_ip: Optional[str] = None
+    user_id: Optional[int] = None
+    ip_address: Optional[str] = None
     user_agent: Optional[str] = None
-    endpoint: Optional[str] = None
-    details: Optional[str] = None  # JSON string
+    details: Optional[Dict[str, Any]] = None
     success: bool
     error_message: Optional[str] = None
     
@@ -295,8 +313,55 @@ class WebhookResponse(WebhookBase):
     id: int
     created_at: datetime
     last_triggered_at: Optional[datetime] = None
+    trigger_count: int
     success_count: int
     failure_count: int
+    
+    class Config:
+        from_attributes = True
+
+
+class SoundDetectionBase(BaseModel):
+    """Base model for sound detection"""
+    camera_id: Optional[int] = Field(None, ge=1, description="Camera ID (optional)")
+    detection_id: Optional[int] = Field(None, ge=1, description="Link to image detection (optional)")
+    sound_class: str = Field(..., min_length=1, max_length=200, description="Detected sound/animal class")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score (0.0-1.0)")
+    audio_path: str = Field(..., min_length=1, max_length=1000, description="Path to audio file")
+    duration: Optional[float] = Field(None, ge=0.0, description="Audio duration in seconds")
+    audio_features: Optional[Dict[str, Any]] = Field(None, description="Audio features as JSON")
+    
+    @field_validator('sound_class')
+    @classmethod
+    def validate_sound_class(cls, v):
+        """Validate sound class name"""
+        if not v or not v.strip():
+            raise ValueError('Sound class cannot be empty')
+        return v.strip()
+    
+    @field_validator('audio_path')
+    @classmethod
+    def validate_audio_path(cls, v):
+        """Validate audio path"""
+        if not v or not v.strip():
+            raise ValueError('Audio path cannot be empty')
+        v = v.strip()
+        # Prevent path traversal
+        if '..' in v:
+            raise ValueError('Audio path cannot contain path traversal (..)')
+        return v
+
+
+class SoundDetectionCreate(SoundDetectionBase):
+    pass
+
+
+class SoundDetectionResponse(SoundDetectionBase):
+    id: int
+    timestamp: datetime
+    audio_url: Optional[str] = None
+    camera_name: Optional[str] = None
+    detection_species: Optional[str] = None  # Species from linked detection if available
     
     class Config:
         from_attributes = True

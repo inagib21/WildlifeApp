@@ -3,7 +3,18 @@ import os
 import secrets
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load environment-specific .env file
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+if ENVIRONMENT == "test":
+    env_file = ".env.test"
+elif ENVIRONMENT == "production":
+    env_file = ".env.production"
+else:
+    env_file = ".env"
+
+# Try to load environment-specific file, fallback to .env
+load_dotenv(env_file)
+load_dotenv()  # Also load .env as fallback
 
 # Database configuration
 DB_USER = os.getenv("DB_USER", "postgres")
@@ -11,11 +22,22 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME", "wildlife")
+DB_SCHEMA = os.getenv("DB_SCHEMA", "public")
 
-DATABASE_URL = os.getenv(
+# Build DATABASE_URL with schema support
+base_url = os.getenv(
     "DATABASE_URL",
     f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
+
+# Add schema to connection string if not default
+if DB_SCHEMA and DB_SCHEMA != "public":
+    if "?" in base_url:
+        DATABASE_URL = f"{base_url}&options=-csearch_path%3D{DB_SCHEMA}"
+    else:
+        DATABASE_URL = f"{base_url}?options=-csearch_path%3D{DB_SCHEMA}"
+else:
+    DATABASE_URL = base_url
 
 # Service URLs
 MOTIONEYE_URL = os.getenv("MOTIONEYE_URL", "http://localhost:8765")
@@ -32,10 +54,19 @@ THINGINO_CAMERA_USERNAME = os.getenv("THINGINO_CAMERA_USERNAME", "root")
 THINGINO_CAMERA_PASSWORD = os.getenv("THINGINO_CAMERA_PASSWORD", "ismart12")
 
 # CORS configuration
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
-).split(",")
+ALLOWED_ORIGINS = [
+    origin.strip() 
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
+    ).split(",")
+    if origin.strip()  # Remove empty strings
+]
+# Ensure localhost:3000 is always included
+if "http://localhost:3000" not in ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS.append("http://localhost:3000")
+if "http://127.0.0.1:3000" not in ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS.append("http://127.0.0.1:3000")
 
 # Email notification configuration (optional)
 NOTIFICATION_ENABLED = os.getenv("NOTIFICATION_ENABLED", "false").lower() == "true"
@@ -80,3 +111,22 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))  # Gener
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 SESSION_EXPIRY_HOURS = int(os.getenv("SESSION_EXPIRY_HOURS", "24"))  # Session expires after 24 hours
 
+# Environment-specific settings
+DEBUG = ENVIRONMENT != "production"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG" if ENVIRONMENT != "production" else "INFO")
+
+# Validation: Prevent production settings in test environment
+if ENVIRONMENT == "test":
+    if os.getenv("DB_NAME", "").endswith("_prod"):
+        raise ValueError("Cannot use production database name in test environment")
+    if DB_SCHEMA == "production":
+        raise ValueError("Cannot use production schema in test environment")
+
+# Validation: Warn about insecure settings in production
+if ENVIRONMENT == "production":
+    if DB_PASSWORD == "postgres" or DB_PASSWORD == "":
+        raise ValueError("Production environment requires a strong database password")
+    if JWT_SECRET_KEY == secrets.token_urlsafe(32) or "CHANGE_THIS" in JWT_SECRET_KEY:
+        raise ValueError("Production environment requires a custom JWT_SECRET_KEY")
+    if "localhost" in ALLOWED_ORIGINS and len(ALLOWED_ORIGINS) == 1:
+        raise ValueError("Production environment should not allow localhost in CORS")

@@ -1,5 +1,5 @@
 """Detection management endpoints"""
-from fastapi import APIRouter, HTTPException, Depends, Request, File, UploadFile
+from fastapi import APIRouter, HTTPException, Depends, Request, File, UploadFile, Query
 from fastapi.responses import FileResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -13,23 +13,229 @@ import ast
 import os
 import csv
 import io
+import zipfile
+import tempfile
+import shutil
+from pathlib import Path
 from fastapi.responses import Response, JSONResponse
 
 try:
-    from ..database import engine, Camera, Detection
-    from ..models import DetectionResponse, DetectionCreate
+    from ..database import engine, Camera, Detection, FaceDetection, KnownFace
+    from ..models import DetectionResponse, DetectionCreate, RecognizedFaceResponse
     from ..utils.audit import log_audit_event
     from ..services.events import get_event_manager
     from ..services.species_info import species_info_service
 except ImportError:
-    from database import engine, Camera, Detection
-    from models import DetectionResponse, DetectionCreate
+    from database import engine, Camera, Detection, FaceDetection, KnownFace
+    from models import DetectionResponse, DetectionCreate, RecognizedFaceResponse
     from utils.audit import log_audit_event
     from services.events import get_event_manager
     from services.species_info import species_info_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _apply_excluded_species_filter(query, db: Session):
+    """Apply excluded species filter to query if configured"""
+    try:
+        try:
+            from ..routers.settings import get_setting
+        except ImportError:
+            from routers.settings import get_setting
+        
+        excluded_species = get_setting(db, "excluded_species", default=[])
+    except Exception as e:
+        logger.warning(f"Error getting excluded_species setting: {e}")
+        return query  # Return query unchanged if we can't get the setting
+    
+    try:
+        if excluded_species and isinstance(excluded_species, list) and len(excluded_species) > 0:
+            # Filter out excluded species (case-insensitive)
+            # Build a list of conditions - species must not contain any excluded term
+            from sqlalchemy import and_
+            
+            # Build exclusion condition: species IS NULL OR species doesn't contain any excluded term
+            # For each excluded species, species must not contain it
+            # Use the simplest possible SQL that PostgreSQL handles well
+            exclusion_conditions = []
+            for excluded in excluded_species:
+                if excluded and str(excluded).strip():
+                    try:
+                        excluded_lower = str(excluded).lower().strip()
+                        # Build condition: species is NULL OR species (lowercased) doesn't contain excluded term
+                        # PostgreSQL handles NULL in LOWER() correctly (returns NULL), and NULL != '%excluded%' is true
+                        # So we can check: species IS NULL OR LOWER(species) NOT LIKE '%excluded%'
+                        exclusion_conditions.append(
+                            or_(
+                                Detection.species.is_(None),
+                                ~func.lower(Detection.species).contains(excluded_lower)
+                            )
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error processing excluded species '{excluded}': {e}")
+                        continue
+            
+            # If we have exclusion conditions, apply them with AND logic
+            # This means: (species is NULL OR doesn't contain excluded[0]) AND (species is NULL OR doesn't contain excluded[1]) AND ...
+            # This is correct: include if species is NULL or doesn't match any exclusion
+            if exclusion_conditions:
+                try:
+                    if len(exclusion_conditions) == 1:
+                        # Single exclusion - just apply it
+                        query = query.filter(exclusion_conditions[0])
+                    else:
+                        # Multiple exclusions - all must be satisfied
+                        # Combine: (NULL OR not contains[0]) AND (NULL OR not contains[1]) ...
+                        combined_condition = and_(*exclusion_conditions)
+                        query = query.filter(combined_condition)
+                    logger.debug(f"Applied excluded species filter: {excluded_species}")
+                except Exception as e:
+                    logger.error(f"Error applying excluded species filter: {e}", exc_info=True)
+                    # Return query unchanged if filter application fails
+                    return query
+    except Exception as e:
+        logger.error(f"Unexpected error in excluded species filter: {e}", exc_info=True)
+        # Return query unchanged on any error
+        return query
+    
+    return query
+
+
+def _export_with_images(
+    detections: List[Detection],
+    format: str,
+    request: Request,
+    db: Session,
+    camera_id: Optional[int] = None,
+    species: Optional[str] = None
+):
+    """Helper function to export detections with images in a zip file"""
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Create temporary directory for zip contents
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        
+        # Create data file (CSV or JSON)
+        if format.lower() == "csv":
+            csv_file = temp_path / f"detections_export_{timestamp_str}.csv"
+            with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "ID", "Camera ID", "Timestamp", "Species", "Confidence", 
+                    "Image Path", "File Size", "Image Width", "Image Height", 
+                    "Prediction Score", "Image Filename"
+                ])
+                
+                for det in detections:
+                    # Determine image filename
+                    image_filename = ""
+                    if det.image_path:
+                        image_filename = Path(det.image_path).name
+                        # Add image to zip
+                        source_path = Path(det.image_path)
+                        if source_path.exists() and source_path.is_file():
+                            # Create images subdirectory
+                            images_dir = temp_path / "images"
+                            images_dir.mkdir(exist_ok=True)
+                            dest_path = images_dir / image_filename
+                            try:
+                                shutil.copy2(source_path, dest_path)
+                            except Exception as e:
+                                logger.warning(f"Could not copy image {source_path}: {e}")
+                    
+                    writer.writerow([
+                        det.id,
+                        det.camera_id,
+                        det.timestamp.isoformat() if det.timestamp else "",
+                        det.species or "",
+                        det.confidence or 0.0,
+                        det.image_path or "",
+                        det.file_size or 0,
+                        det.image_width or 0,
+                        det.image_height or 0,
+                        det.prediction_score or 0.0,
+                        image_filename
+                    ])
+            
+            data_file = csv_file
+        
+        else:  # JSON
+            json_file = temp_path / f"detections_export_{timestamp_str}.json"
+            detections_data = []
+            images_dir = temp_path / "images"
+            images_dir.mkdir(exist_ok=True)
+            
+            for det in detections:
+                image_filename = ""
+                if det.image_path:
+                    image_filename = Path(det.image_path).name
+                    # Add image to zip
+                    source_path = Path(det.image_path)
+                    if source_path.exists() and source_path.is_file():
+                        dest_path = images_dir / image_filename
+                        try:
+                            shutil.copy2(source_path, dest_path)
+                        except Exception as e:
+                            logger.warning(f"Could not copy image {source_path}: {e}")
+                
+                detections_data.append({
+                    "id": det.id,
+                    "camera_id": det.camera_id,
+                    "timestamp": det.timestamp.isoformat() if det.timestamp else None,
+                    "species": det.species,
+                    "confidence": det.confidence,
+                    "image_path": det.image_path,
+                    "image_filename": image_filename,
+                    "file_size": det.file_size,
+                    "image_width": det.image_width,
+                    "image_height": det.image_height,
+                    "prediction_score": det.prediction_score
+                })
+            
+            with open(json_file, 'w', encoding='utf-8') as f:
+                json.dump(detections_data, f, indent=2)
+            
+            data_file = json_file
+        
+        # Create zip file in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Add data file
+            zip_file.write(data_file, data_file.name)
+            
+            # Add all images
+            images_dir = temp_path / "images"
+            if images_dir.exists():
+                for image_file in images_dir.iterdir():
+                    if image_file.is_file():
+                        zip_file.write(image_file, f"images/{image_file.name}")
+        
+        zip_buffer.seek(0)
+        
+        # Log export
+        log_audit_event(
+            db=db,
+            request=request,
+            action="EXPORT",
+            resource_type="detection",
+            details={
+                "format": f"{format}_with_images",
+                "count": len(detections),
+                "camera_id": camera_id,
+                "species": species,
+                "include_images": True
+            }
+        )
+        
+        return Response(
+            content=zip_buffer.read(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f"attachment; filename=detections_export_{timestamp_str}.zip"
+            }
+        )
 
 
 def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
@@ -42,10 +248,12 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
         camera_id: Optional[int] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        species: Optional[str] = None,
+        species: Optional[List[str]] = Query(None), # Changed to List[str]
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         search: Optional[str] = None,
+        min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum confidence score (0.0-1.0)"),
+        max_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Maximum confidence score (0.0-1.0)"),
         db: Session = Depends(get_db),
         request: Request = None
     ):
@@ -66,8 +274,28 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
                 if camera_id is not None:
                     query = query.filter(Detection.camera_id == camera_id)
                 
-                if species is not None:
-                    query = query.filter(Detection.species.ilike(f"%{species}%"))
+                # Enhanced species filtering (supports multiple species)
+                if species:
+                    # If species is a list of strings
+                    if isinstance(species, list):
+                        species_conditions = []
+                        for s in species:
+                            if s:
+                                species_conditions.append(Detection.species.ilike(f"%{s}%"))
+                        if species_conditions:
+                            query = query.filter(or_(*species_conditions))
+                    # If species is a single string (backward compatibility)
+                    elif isinstance(species, str):
+                        query = query.filter(Detection.species.ilike(f"%{species}%"))
+                
+                # Apply confidence filters
+                if min_confidence is not None:
+                    query = query.filter(Detection.confidence >= min_confidence)
+                if max_confidence is not None:
+                    query = query.filter(Detection.confidence <= max_confidence)
+                
+                # Apply excluded species filter
+                query = _apply_excluded_species_filter(query, db)
                 
                 if start_date:
                     try:
@@ -111,13 +339,44 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
                     query = query.offset(offset)
                 
                 detections = query.all()
-                logging.info(f"Query returned {len(detections)} detections from database")
+                logger.info(f"Query returned {len(detections)} detections from database")
+                if len(detections) == 0:
+                    logger.info(f"No detections found. Total in DB: {db.query(Detection).count()}")
             
                 # Batch-fetch all cameras to avoid N+1 queries
                 camera_ids = {d.camera_id for d in detections if d.camera_id is not None}
                 cameras = {}
                 if camera_ids:
                     cameras = {c.id: c for c in db.query(Camera).filter(Camera.id.in_(camera_ids)).all()}
+                
+                # Batch-fetch face detections and known faces to avoid N+1 queries
+                detection_ids = [d.id for d in detections]
+                face_detections_map = {}
+                known_faces_map = {}
+                if detection_ids:
+                    face_detections = db.query(FaceDetection).filter(FaceDetection.detection_id.in_(detection_ids)).all()
+                    for fd in face_detections:
+                        if fd.detection_id not in face_detections_map:
+                            face_detections_map[fd.detection_id] = []
+                        face_detections_map[fd.detection_id].append(fd)
+                    
+                    # Get all known face IDs and fetch them
+                    known_face_ids = {fd.known_face_id for fd in face_detections if fd.known_face_id is not None}
+                    if known_face_ids:
+                        known_faces = db.query(KnownFace).filter(KnownFace.id.in_(known_face_ids)).all()
+                        known_faces_map = {kf.id: kf for kf in known_faces}
+                
+                # Batch-fetch species info for unique species (optimization: reduce redundant lookups)
+                unique_species = {str(d.species).strip() for d in detections if d.species and str(d.species).strip() and str(d.species).strip() != "Unknown"}
+                species_info_cache = {}
+                for species_name in unique_species:
+                    try:
+                        species_info_dict = species_info_service.get_species_info(species_name)
+                        if species_info_dict:
+                            from models import SpeciesInfoResponse
+                            species_info_cache[species_name] = SpeciesInfoResponse(**species_info_dict)
+                    except Exception:
+                        pass  # Skip errors, will be None for this species
             
                 # Convert to response models with media URLs
                 result = []
@@ -151,16 +410,8 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
                         confidence_val = float(detection.confidence) if detection.confidence is not None else 0.0
                         confidence_val = max(0.0, min(1.0, confidence_val))  # Clamp to 0.0-1.0
                         
-                        # Get species information
-                        species_info = None
-                        if species_val and species_val != "Unknown":
-                            try:
-                                species_info_dict = species_info_service.get_species_info(species_val)
-                                if species_info_dict:
-                                    from models import SpeciesInfoResponse
-                                    species_info = SpeciesInfoResponse(**species_info_dict)
-                            except Exception as e:
-                                logger.debug(f"Error getting species info for {species_val}: {e}")
+                        # Get species information from cache (batched lookup)
+                        species_info = species_info_cache.get(species_val)
                         
                         # Normalize image_path to ensure it passes validation
                         # The validator requires either a valid image extension or a temp path
@@ -219,6 +470,8 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
                             "prediction_score": float(detection.prediction_score) if detection.prediction_score is not None else None,
                             "detections_json": detections_json_val,
                             "media_url": None,  # Will be set below
+                            "video_url": None,  # Will be set below
+                            "thumbnail_url": None,  # Will be set below
                             "camera_name": str(camera_name),  # Add camera name to response
                             "species_info": species_info  # Add species information
                         }
@@ -270,6 +523,109 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
                             except Exception as e:
                                 logging.warning(f"Error generating media_url for detection {detection.id}: {e}")
                                 detection_dict["media_url"] = None
+                        
+                        # Generate thumbnail URL from image path (if media_url was successfully generated)
+                        if detection_dict["media_url"] and detection.image_path:
+                            try:
+                                # Resolve absolute path to image file for thumbnail generation
+                                current_file = os.path.abspath(__file__)  # .../wildlife-app/backend/routers/detections.py
+                                routers_dir = os.path.dirname(current_file)  # .../wildlife-app/backend/routers
+                                backend_dir = os.path.dirname(routers_dir)  # .../wildlife-app/backend
+                                project_root = os.path.dirname(backend_dir)  # .../wildlife-app
+                                
+                                # Reconstruct absolute path from image_path
+                                image_path_normalized = detection.image_path.replace("\\", "/")
+                                image_parts = [p for p in image_path_normalized.split("/") if p]
+                                
+                                absolute_image_path = None
+                                if "motioneye_media" in image_parts:
+                                    # Build path: project_root/motioneye_media/CameraX/date/filename
+                                    idx = image_parts.index("motioneye_media")
+                                    relative_path = os.path.join(*image_parts[idx:])
+                                    absolute_image_path = os.path.join(project_root, relative_path)
+                                elif "archived_photos" in image_parts:
+                                    # Build path: project_root/archived_photos/species/camera/date/filename
+                                    idx = image_parts.index("archived_photos")
+                                    relative_path = os.path.join(*image_parts[idx:])
+                                    absolute_image_path = os.path.join(project_root, relative_path)
+                                elif os.path.isabs(detection.image_path):
+                                    # Already absolute path
+                                    absolute_image_path = detection.image_path
+                                
+                                # Generate thumbnail if absolute path exists
+                                if absolute_image_path and os.path.exists(absolute_image_path):
+                                    from utils.image_compression import get_thumbnail_url
+                                    thumbnail_url = get_thumbnail_url(absolute_image_path, size=(200, 200))
+                                    if thumbnail_url:
+                                        # Convert to URL format that works with the frontend
+                                        # get_thumbnail_url returns path like /thumbnails/abc123.jpg
+                                        # We need to make sure it's served from the backend
+                                        if thumbnail_url.startswith("/"):
+                                            # Extract filename from thumbnail path
+                                            thumbnail_filename = os.path.basename(thumbnail_url)
+                                            detection_dict["thumbnail_url"] = f"/thumbnails/{thumbnail_filename}"
+                                        else:
+                                            detection_dict["thumbnail_url"] = thumbnail_url
+                            except Exception as e:
+                                # Silently fail - thumbnails are optional
+                                logging.debug(f"Could not generate thumbnail for detection {detection.id}: {e}")
+                                detection_dict["thumbnail_url"] = None
+                        
+                        # Generate video URL from video path
+                        if detection.video_path:
+                            try:
+                                import os
+                                # Normalize path for both Windows and Linux
+                                path = detection.video_path.replace("\\", "/")
+                                # Remove empty parts and normalize
+                                parts = [p for p in path.split("/") if p]
+                                
+                                # Find the filename (last segment with video extension)
+                                video_extensions = ["mp4", "mkv", "avi", "mov", "webm", "m4v"]
+                                filename = None
+                                filename_idx = -1
+                                for i in range(len(parts) - 1, -1, -1):
+                                    if "." in parts[i]:
+                                        ext = parts[i].split(".")[-1].lower()
+                                        if ext in video_extensions:
+                                            filename = parts[i]
+                                            filename_idx = i
+                                            break
+                                
+                                if filename:
+                                    # Look for motioneye_media/CameraX/date/filename
+                                    if "motioneye_media" in parts:
+                                        idx = parts.index("motioneye_media")
+                                        if len(parts) > idx + 2 and filename_idx > idx + 2:
+                                            camera_folder = parts[idx + 1]  # Camera1
+                                            date_folder = parts[idx + 2]    # 2025-07-15
+                                            detection_dict["video_url"] = f"/media/{camera_folder}/{date_folder}/{filename}"
+                                    # Look for archived_photos/common_name/camera/date/filename
+                                    elif "archived_photos" in parts:
+                                        idx = parts.index("archived_photos")
+                                        if len(parts) > idx + 3 and filename_idx > idx + 3:
+                                            species_name = parts[idx + 1]    # human, vehicle, etc.
+                                            camera_folder = parts[idx + 2]   # 1, 2, etc.
+                                            date_folder = parts[idx + 3]    # 2025-08-11
+                                            detection_dict["video_url"] = f"/archived_photos/{species_name}/{camera_folder}/{date_folder}/{filename}"
+                            except Exception as e:
+                                logging.warning(f"Error generating video_url for detection {detection.id}: {e}")
+                                detection_dict["video_url"] = None
+                        
+                        # Add recognized faces
+                        recognized_faces_list = []
+                        if detection.id in face_detections_map:
+                            for face_detection in face_detections_map[detection.id]:
+                                if face_detection.known_face_id and face_detection.known_face_id in known_faces_map:
+                                    known_face = known_faces_map[face_detection.known_face_id]
+                                    recognized_faces_list.append(RecognizedFaceResponse(
+                                        id=face_detection.id,
+                                        name=known_face.name,
+                                        confidence=float(face_detection.confidence) if face_detection.confidence else 0.0,
+                                        known_face_id=face_detection.known_face_id
+                                    ))
+                        detection_dict["recognized_faces"] = recognized_faces_list
+                        
                         # Validate the detection_dict before creating DetectionResponse
                         # This helps catch validation errors early
                         try:
@@ -302,14 +658,16 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
         camera_id: Optional[int] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        species: Optional[str] = None,
+        species: Optional[List[str]] = Query(None),
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         search: Optional[str] = None,
+        min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum confidence score (0.0-1.0)"),
+        max_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Maximum confidence score (0.0-1.0)"),
         db: Session = Depends(get_db)
     ):
         """Alias for /detections to support frontend API calls"""
-        return get_detections(camera_id, limit, offset, species, start_date, end_date, search, db)
+        return get_detections(camera_id, limit, offset, species, start_date, end_date, search, min_confidence, max_confidence, db)
 
     @router.post("/detections", response_model=DetectionResponse)
     def create_detection(request: Request, detection: DetectionCreate, db: Session = Depends(get_db)):
@@ -430,11 +788,25 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
         db: Session = Depends(get_db)
     ):
         """Get total count of detections"""
-        query = db.query(Detection)
-        if camera_id:
-            query = query.filter(Detection.camera_id == camera_id)
-        count = query.count()
-        return {"count": count}
+        try:
+            query = db.query(Detection)
+            if camera_id:
+                query = query.filter(Detection.camera_id == camera_id)
+            
+            # Apply excluded species filter (with error handling built in)
+            try:
+                query = _apply_excluded_species_filter(query, db)
+            except Exception as filter_error:
+                logger.warning(f"Error applying excluded species filter (continuing without filter): {filter_error}")
+                # Continue without the filter if it fails
+            
+            count = query.count()
+            logger.debug(f"Detections count query successful: count={count}, camera_id={camera_id}")
+            return {"count": count}
+        except Exception as e:
+            logger.error(f"Error getting detections count: {e}", exc_info=True)
+            # Return 0 on error rather than crashing
+            return {"count": 0}
 
     @router.get("/api/detections/count")
     def get_detections_count_api(
@@ -451,19 +823,28 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
     ):
         """Get species counts for different time ranges"""
         try:
-            # Base query
-            query = db.query(Detection.species, func.count(Detection.id).label('count'))
+            # Base query - need to query Detection object to apply filters
+            base_query = db.query(Detection)
             
             # Apply time filter
             if range == "week":
                 week_ago = datetime.now() - timedelta(days=7)
-                query = query.filter(Detection.timestamp >= week_ago)
+                base_query = base_query.filter(Detection.timestamp >= week_ago)
             elif range == "month":
                 month_ago = datetime.now() - timedelta(days=30)
-                query = query.filter(Detection.timestamp >= month_ago)
+                base_query = base_query.filter(Detection.timestamp >= month_ago)
             elif range != "all":
-                # Invalid range parameter
-                raise HTTPException(status_code=400, detail=f"Invalid range parameter: {range}. Must be 'week', 'month', or 'all'")
+                # Invalid range parameter - use "all" as default
+                range = "all"
+            
+            # Apply excluded species filter
+            base_query = _apply_excluded_species_filter(base_query, db)
+            
+            # Now build the aggregation query for species counts
+            query = base_query.with_entities(
+                Detection.species,
+                func.count(Detection.id).label('count')
+            )
             
             # Group by species and get counts
             results = query.group_by(Detection.species).order_by(func.count(Detection.id).desc()).limit(10).all()
@@ -594,7 +975,8 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
     @router.get("/analytics/detections/timeseries")
     def analytics_detections_timeseries(
         interval: str = "hour",  # "hour" or "day"
-        days: int = 7
+        days: int = 7,
+        db: Session = Depends(get_db)
     ):
         """Return detection counts grouped by hour or day for the last N days."""
         if interval not in ("hour", "day"):
@@ -602,10 +984,28 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
         
         group_expr = f"date_trunc('{interval}', timestamp)"
         
+        # Build excluded species filter for SQL
+        excluded_species_filter = ""
+        try:
+            from ..routers.settings import get_setting
+        except ImportError:
+            from routers.settings import get_setting
+        
+        excluded_species = get_setting(db, "excluded_species", default=[])
+        if excluded_species and isinstance(excluded_species, list):
+            excluded_list = [s.strip() for s in excluded_species if s.strip()]
+            if excluded_list:
+                # Build SQL exclusion clause
+                excluded_conditions = " AND ".join([
+                    f"LOWER(species) NOT LIKE '%{s.lower()}%'" for s in excluded_list
+                ])
+                excluded_species_filter = f" AND {excluded_conditions}"
+        
         sql = f"""
             SELECT {group_expr} as bucket, COUNT(*) as count
             FROM detections
             WHERE timestamp >= NOW() - INTERVAL '{days} days'
+            {excluded_species_filter}
             GROUP BY bucket
             ORDER BY bucket ASC
         """
@@ -617,13 +1017,31 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
     @router.get("/analytics/detections/top_species")
     def analytics_detections_top_species(
         limit: int = 5,
-        days: int = 30
+        days: int = 30,
+        db: Session = Depends(get_db)
     ):
         """Return the top N species detected in the last N days."""
+        # Build excluded species filter for SQL
+        excluded_species_filter = ""
+        try:
+            from ..routers.settings import get_setting
+        except ImportError:
+            from routers.settings import get_setting
+        
+        excluded_species = get_setting(db, "excluded_species", default=[])
+        if excluded_species and isinstance(excluded_species, list):
+            excluded_list = [s.strip() for s in excluded_species if s.strip()]
+            if excluded_list:
+                excluded_conditions = " AND ".join([
+                    f"LOWER(species) NOT LIKE '%{s.lower()}%'" for s in excluded_list
+                ])
+                excluded_species_filter = f" AND {excluded_conditions}"
+        
         sql = f"""
             SELECT species, COUNT(*) as count
             FROM detections
             WHERE timestamp >= NOW() - INTERVAL '{days} days'
+            {excluded_species_filter}
             GROUP BY species
             ORDER BY count DESC
             LIMIT {limit}
@@ -635,18 +1053,36 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
 
     @router.get("/analytics/detections/unique_species_count")
     def analytics_detections_unique_species_count(
-        days: int = 30
+        days: int = 30,
+        db: Session = Depends(get_db)
     ):
         """Return the number of unique species detected in the last N days."""
+        # Build excluded species filter for SQL
+        excluded_species_filter = ""
+        try:
+            from ..routers.settings import get_setting
+        except ImportError:
+            from routers.settings import get_setting
+        
+        excluded_species = get_setting(db, "excluded_species", default=[])
+        if excluded_species and isinstance(excluded_species, list):
+            excluded_list = [s.strip() for s in excluded_species if s.strip()]
+            if excluded_list:
+                excluded_conditions = " AND ".join([
+                    f"LOWER(species) NOT LIKE '%{s.lower()}%'" for s in excluded_list
+                ])
+                excluded_species_filter = f" AND {excluded_conditions}"
+        
         sql = f"""
             SELECT COUNT(DISTINCT species) as unique_species
             FROM detections
             WHERE timestamp >= NOW() - INTERVAL '{days} days'
+            {excluded_species_filter}
         """
         with engine.connect() as conn:
             result = conn.execute(text(sql))
             unique_species = result.scalar()
-        return {"unique_species": unique_species}
+        return {"unique_species": unique_species or 0}
 
     @router.get("/api/detections/export")
     @limiter.limit("10/minute")  # Rate limit: 10 requests per minute (expensive operation)
@@ -658,17 +1094,39 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         limit: Optional[int] = None,
+        include_images: bool = False,  # Include images in zip file
+        min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum confidence score (0.0-1.0)"),
+        max_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Maximum confidence score (0.0-1.0)"),
+        detection_ids: Optional[str] = Query(None, description="Comma-separated list of detection IDs to export"),
         db: Session = Depends(get_db)
     ):
-        """Export detections to CSV, JSON, or PDF format"""
+        """Export detections to CSV, JSON, or PDF format. Optionally include images in a zip file."""
         # Build query with filters
         query = db.query(Detection)
+        
+        # If specific detection IDs provided, filter by those first
+        if detection_ids:
+            try:
+                ids_list = [int(id_str.strip()) for id_str in detection_ids.split(',') if id_str.strip()]
+                if ids_list:
+                    query = query.filter(Detection.id.in_(ids_list))
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid detection_ids format. Use comma-separated integers.")
         
         if camera_id:
             query = query.filter(Detection.camera_id == camera_id)
         
         if species:
             query = query.filter(Detection.species.ilike(f"%{species}%"))
+        
+        # Apply confidence filters
+        if min_confidence is not None:
+            query = query.filter(Detection.confidence >= min_confidence)
+        if max_confidence is not None:
+            query = query.filter(Detection.confidence <= max_confidence)
+        
+        # Apply excluded species filter
+        query = _apply_excluded_species_filter(query, db)
         
         if start_date:
             try:
@@ -690,6 +1148,17 @@ def setup_detections_router(limiter: Limiter, get_db) -> APIRouter:
         query = query.order_by(Detection.timestamp.desc()).limit(limit)
         
         detections = query.all()
+        
+        # If include_images is True, create a zip file with CSV/JSON + images
+        if include_images:
+            return _export_with_images(
+                detections=detections,
+                format=format,
+                request=request,
+                db=db,
+                camera_id=camera_id,
+                species=species
+            )
         
         if format.lower() == "csv":
             # Generate CSV

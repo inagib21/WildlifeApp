@@ -176,16 +176,38 @@ If a backend shows as unavailable:
    pip install ultralytics
    ```
 
-2. **CLIP**: Install transformers and torch
+2. **CLIP/ViT (Hugging Face)**: Install transformers and torch
    ```bash
    pip install transformers torch
    ```
+   **Note:** CLIP and ViT models are downloaded from Hugging Face Hub on first use (~500MB each). Internet connection required for initial download. Models are cached locally after download.
+   
+   See [`HUGGING_FACE_USAGE.md`](../HUGGING_FACE_USAGE.md) for detailed information about Hugging Face integration.
 
 3. **SpeciesNet**: Make sure SpeciesNet server is running
    ```bash
    # Check if server is running
    curl http://localhost:8000/api/speciesnet/status
+   # Or check health endpoint
+   curl http://localhost:8000/health
    ```
+   
+   **Note:** SpeciesNet is the original wildlife classification backend from Google's CameraTrapAI. It uses YOLOv5 and is trained specifically on camera trap images. SpeciesNet is always available if the SpeciesNet server is running.
+
+   **Testing SpeciesNet:**
+   ```bash
+   # Test with an image
+   curl -X POST http://localhost:8000/predict \
+     -F "file=@test_image.jpg"
+   ```
+
+4. **Face Recognition**: Install face-recognition (automatically installs dlib)
+   ```bash
+   # Important: Do NOT install dlib-binary separately - it's not needed and will fail on Windows
+   # The face-recognition package automatically installs dlib
+   pip install face-recognition
+   ```
+   **Note:** See `DLIB_BINARY_FIX.md` for details about why `dlib-binary` should not be installed separately.
 
 ### Test Script Errors
 
@@ -213,7 +235,8 @@ Expected performance on a modern GPU:
 | YOLOv11 | 40-60ms | 90-95% | Speed + Accuracy |
 | YOLOv8 | 50-70ms | 85-90% | Good balance |
 | SpeciesNet | 80-120ms | 75-80% | General wildlife |
-| CLIP | 200-400ms | 80-85% | Rare species |
+| CLIP (Hugging Face) | 200-400ms | 80-85% | Rare species, zero-shot |
+| ViT (Hugging Face) | 150-300ms | 85-90% | High accuracy |
 | Ensemble | 300-600ms | 92-97% | Maximum accuracy |
 
 *Times are for inference only, not including image loading*

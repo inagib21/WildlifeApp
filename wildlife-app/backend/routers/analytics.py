@@ -3,17 +3,31 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import Optional
 from datetime import datetime, timedelta
 import logging
 
 try:
     from ..database import Detection, Camera
+    from ..routers.settings import get_setting
 except ImportError:
     from database import Detection, Camera
+    from routers.settings import get_setting
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _apply_excluded_species_filter(query, db: Session):
+    """Apply excluded species filter to query if configured"""
+    excluded_species = get_setting(db, "excluded_species", default=[])
+    if excluded_species and isinstance(excluded_species, list):
+        # Filter out excluded species (case-insensitive)
+        for excluded in excluded_species:
+            if excluded and excluded.strip():
+                query = query.filter(~func.lower(Detection.species).contains(excluded.lower().strip()))
+    return query
 
 
 def setup_analytics_router(limiter: Limiter, get_db) -> APIRouter:
@@ -66,6 +80,9 @@ def setup_analytics_router(limiter: Limiter, get_db) -> APIRouter:
                         query = query.filter(Detection.timestamp <= end_dt)
                     except ValueError:
                         logging.error(f"Could not parse end_date: {end_date}")
+            
+            # Apply excluded species filter
+            query = _apply_excluded_species_filter(query, db)
             
             detections = query.all()
             
@@ -158,6 +175,9 @@ def setup_analytics_router(limiter: Limiter, get_db) -> APIRouter:
                     except ValueError:
                         logging.error(f"Could not parse end_date: {end_date}")
             
+            # Apply excluded species filter
+            query = _apply_excluded_species_filter(query, db)
+            
             detections = query.all()
             
             # Group by time interval
@@ -248,6 +268,9 @@ def setup_analytics_router(limiter: Limiter, get_db) -> APIRouter:
                     except ValueError:
                         logging.error(f"Could not parse end_date: {end_date}")
             
+            # Apply excluded species filter
+            query = _apply_excluded_species_filter(query, db)
+            
             detections = query.all()
             
             # Group by camera
@@ -302,5 +325,109 @@ def setup_analytics_router(limiter: Limiter, get_db) -> APIRouter:
         except Exception as e:
             logging.error(f"Failed to get camera analytics: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to get camera analytics: {str(e)}")
+
+    @router.get("/api/analytics/time-patterns")
+    @limiter.limit("60/minute")
+    def get_time_patterns(
+        request: Request,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        camera_id: Optional[int] = None,
+        db: Session = Depends(get_db)
+    ):
+        """
+        Get time-of-day and day-of-week patterns
+        
+        Returns:
+        - Detections by hour of day (0-23)
+        - Detections by day of week (Mon-Sun)
+        - Detections by month
+        """
+        try:
+            query = db.query(Detection)
+            
+            # Apply filters
+            if camera_id:
+                query = query.filter(Detection.camera_id == camera_id)
+            if start_date:
+                try:
+                    start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                    query = query.filter(Detection.timestamp >= start_dt)
+                except (ValueError, AttributeError):
+                    try:
+                        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                        query = query.filter(Detection.timestamp >= start_dt)
+                    except ValueError:
+                        pass
+            if end_date:
+                try:
+                    end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                    query = query.filter(Detection.timestamp <= end_dt)
+                except (ValueError, AttributeError):
+                    try:
+                        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                        query = query.filter(Detection.timestamp <= end_dt)
+                    except ValueError:
+                        pass
+            
+            # Apply excluded species filter
+            query = _apply_excluded_species_filter(query, db)
+            
+            detections = query.all()
+            
+            # Initialize pattern arrays
+            hour_pattern = {str(i): 0 for i in range(24)}
+            day_pattern = {
+                "Monday": 0, "Tuesday": 0, "Wednesday": 0, "Thursday": 0,
+                "Friday": 0, "Saturday": 0, "Sunday": 0
+            }
+            month_pattern = {str(i): 0 for i in range(1, 13)}
+            
+            # Process detections
+            for detection in detections:
+                dt = detection.timestamp
+                
+                # Hour of day (0-23)
+                hour = dt.hour
+                hour_pattern[str(hour)] = hour_pattern.get(str(hour), 0) + 1
+                
+                # Day of week
+                day_name = dt.strftime("%A")
+                day_pattern[day_name] = day_pattern.get(day_name, 0) + 1
+                
+                # Month (1-12)
+                month = dt.month
+                month_pattern[str(month)] = month_pattern.get(str(month), 0) + 1
+            
+            # Format hour pattern
+            hour_data = [
+                {"hour": i, "hour_label": f"{i:02d}:00", "count": hour_pattern[str(i)]}
+                for i in range(24)
+            ]
+            
+            # Format day pattern
+            day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            day_data = [
+                {"day": day, "count": day_pattern[day]}
+                for day in day_order
+            ]
+            
+            # Format month pattern
+            month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            month_data = [
+                {"month": i, "month_label": month_names[i-1], "count": month_pattern[str(i)]}
+                for i in range(1, 13)
+            ]
+            
+            return {
+                "hour_pattern": hour_data,
+                "day_pattern": day_data,
+                "month_pattern": month_data,
+                "total_detections": len(detections)
+            }
+        except Exception as e:
+            logging.error(f"Failed to get time patterns: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Failed to get time patterns: {str(e)}")
 
     return router

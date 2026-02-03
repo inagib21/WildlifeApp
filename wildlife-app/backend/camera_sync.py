@@ -61,13 +61,22 @@ def sync_motioneye_cameras(
             logger.info("Synced new MotionEye camera %s (%s)", mapped["name"], camera_id)
         else:
             updated = False
+            # Always update is_active from MotionEye to keep it in sync
+            me_is_active = mapped.get("is_active", True)
+            if existing.is_active != me_is_active:
+                existing.is_active = me_is_active
+                updated = True
+                logger.info("Updated camera %s (%s) is_active: %s -> %s", mapped["name"], camera_id, existing.is_active, me_is_active)
+            
+            # Update other fields
             for field, value in mapped.items():
-                if getattr(existing, field) != value:
-                    setattr(existing, field, value)
-                    updated = True
+                if field != "is_active":  # Already handled above
+                    if getattr(existing, field) != value:
+                        setattr(existing, field, value)
+                        updated = True
             if updated:
                 updated_count += 1
-                logger.info("Updated MotionEye camera %s (%s)", mapped["name"], camera_id)
+                logger.info("Updated MotionEye camera %s (%s) - Active: %s", mapped["name"], camera_id, existing.is_active)
 
     removed_count = 0
     if motioneye_ids:

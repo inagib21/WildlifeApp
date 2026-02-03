@@ -590,20 +590,61 @@ class EnsembleBackend(AIBackend):
     def is_available(self) -> bool:
         return len(self.backends) > 0
     
-    def predict(self, image_path: str) -> Dict[str, Any]:
-        """Predict using ensemble of models"""
-        if not self.is_available():
+    def _get_enabled_backends(self, db_session=None) -> List[AIBackend]:
+        """Get list of enabled backends"""
+        if not db_session:
+            return self.backends
+        
+        try:
+            from ..routers.settings import get_setting
+        except ImportError:
+            try:
+                from routers.settings import get_setting
+            except ImportError:
+                return self.backends
+        
+        enabled_backends = []
+        for backend in self.backends:
+            # Get backend name from manager
+            backend_name = None
+            if isinstance(backend, SpeciesNetBackend):
+                backend_name = "speciesnet"
+            elif isinstance(backend, YOLOv11Backend):
+                backend_name = "yolov11"
+            elif isinstance(backend, YOLOv8Backend):
+                backend_name = "yolov8"
+            elif isinstance(backend, CLIPBackend):
+                backend_name = "clip"
+            elif isinstance(backend, ViTBackend):
+                backend_name = "vit"
+            
+            if backend_name:
+                setting_key = f"model_{backend_name}_enabled"
+                is_enabled = get_setting(db_session, setting_key, default=True)
+                if is_enabled:
+                    enabled_backends.append(backend)
+            else:
+                # Unknown backend type, include by default
+                enabled_backends.append(backend)
+        
+        return enabled_backends if enabled_backends else self.backends  # Fallback to all if none enabled
+    
+    def predict(self, image_path: str, db_session=None) -> Dict[str, Any]:
+        """Predict using ensemble of models - only uses enabled backends"""
+        enabled_backends = self._get_enabled_backends(db_session)
+        
+        if not enabled_backends:
             return {
                 "predictions": [],
                 "model": "ensemble",
-                "error": "No backends available"
+                "error": "No enabled backends available"
             }
         
-        # Get predictions from all backends
+        # Get predictions from all enabled backends
         all_predictions = {}
         model_names = []
         
-        for backend in self.backends:
+        for backend in enabled_backends:
             try:
                 result = backend.predict(image_path)
                 if "error" not in result:
@@ -624,7 +665,7 @@ class EnsembleBackend(AIBackend):
             # Average the scores from all models
             avg_score = sum(scores) / len(scores)
             # Boost if multiple models agree
-            agreement_boost = len(scores) / len(self.backends)
+            agreement_boost = len(scores) / max(len(enabled_backends), 1) if enabled_backends else 1
             final_score = avg_score * (1 + agreement_boost * 0.1)
             final_score = min(1.0, final_score)
             
@@ -633,14 +674,45 @@ class EnsembleBackend(AIBackend):
                 "prediction_score": final_score
             })
         
-        # Sort by confidence
+        # Apply living things priority rule if enabled
+        try:
+            if db_session:
+                try:
+                    from ..routers.settings import get_setting
+                except ImportError:
+                    try:
+                        from routers.settings import get_setting
+                    except ImportError:
+                        get_setting = None
+                
+                if get_setting:
+                    try:
+                        priority_enabled = get_setting(db_session, "priority_living_things", default=True)
+                        
+                        if priority_enabled:
+                            # Import smart detection processor for living thing classification
+                            try:
+                                from .smart_detection import SmartDetectionProcessor
+                                processor = SmartDetectionProcessor(db=db_session)
+                                combined = processor.apply_living_priority(combined, boost_factor=0.15)
+                            except Exception as e:
+                                logger.warning(f"Error applying living priority in ensemble: {e}")
+                    except Exception as e:
+                        logger.debug(f"Could not check living priority setting: {e}")
+        except Exception as e:
+            logger.debug(f"Could not apply living priority (non-critical): {e}")
+        
+        # Sort by confidence (living things should already be prioritized)
         combined.sort(key=lambda x: x["prediction_score"], reverse=True)
         
+        # Use enabled_backends length for agreement boost calculation
+        enabled_count = len(enabled_backends)
         return {
             "predictions": combined[:5],  # Top 5
             "model": f"ensemble ({', '.join(model_names)})",
             "confidence": combined[0]["prediction_score"] if combined else 0.0,
-            "models_used": model_names
+            "models_used": model_names,
+            "enabled_count": enabled_count
         }
     
     def get_name(self) -> str:
@@ -725,9 +797,10 @@ class AIBackendManager:
             unavailable_count += 1
             logger.warning("  [FAIL] ViT backend not available")
         
-        # Ensemble (if multiple backends available)
+        # Ensemble (if multiple backends available) - will filter by enabled status at runtime
         if len(self.backends) > 1:
-            ensemble = EnsembleBackend(list(self.backends.values()))
+            # Ensemble will filter by enabled status when predicting (db_session passed at runtime)
+            ensemble = EnsembleBackend(list([b for name, b in self.backends.items() if name != "ensemble"]))
             self.backends["ensemble"] = ensemble
             available_count += 1
             logger.info(f"  [OK] Ensemble backend registered (combining {len(self.backends) - 1} models)")
@@ -768,10 +841,40 @@ class AIBackendManager:
         logger.info(f"AI Backend Manager initialized - Default: {self.default_backend}")
         logger.info("=" * 60)
     
-    def get_backend(self, name: Optional[str] = None) -> Optional[AIBackend]:
-        """Get backend by name, or default if not specified"""
+    def get_backend(self, name: Optional[str] = None, db_session=None) -> Optional[AIBackend]:
+        """Get backend by name, or default if not specified. Checks if model is enabled."""
         if name is None:
             name = self.default_backend
+        
+        # Check if the requested backend is enabled
+        if db_session:
+            try:
+                from ..routers.settings import get_setting
+            except ImportError:
+                from routers.settings import get_setting
+            
+            setting_key = f"model_{name.lower()}_enabled"
+            is_enabled = get_setting(db_session, setting_key, default=True)
+            
+            if not is_enabled:
+                logger.info(f"Model '{name}' is disabled, trying to find alternative")
+                # Try to find an enabled alternative
+                for alt_name, alt_backend in self.backends.items():
+                    if alt_name == name or alt_name == "ensemble":
+                        continue
+                    alt_setting_key = f"model_{alt_name.lower()}_enabled"
+                    alt_enabled = get_setting(db_session, alt_setting_key, default=True)
+                    if alt_enabled and alt_backend.is_available():
+                        logger.info(f"Using alternative backend '{alt_name}' instead of disabled '{name}'")
+                        return alt_backend
+                
+                # If no alternative found and it's the requested backend, return None
+                if name == self.default_backend:
+                    logger.warning(f"Default backend '{name}' is disabled and no alternatives available")
+                    return None
+                
+                # For explicitly requested disabled backend, return None
+                return None
         
         return self.backends.get(name)
     
@@ -870,12 +973,12 @@ class AIBackendManager:
                 
         return results
 
-    def predict(self, image_path: str, backend_name: Optional[str] = None) -> Dict[str, Any]:
+    def predict(self, image_path: str, backend_name: Optional[str] = None, db_session=None) -> Dict[str, Any]:
         """Predict using specified backend or default with detailed logging and metrics"""
         backend_to_use = backend_name or self.default_backend
         logger.debug(f"Predicting with backend: '{backend_to_use}' (requested: {backend_name}, default: {self.default_backend})")
         
-        backend = self.get_backend(backend_name)
+        backend = self.get_backend(backend_name, db_session=db_session)
         if not backend:
             logger.warning(f"Backend '{backend_to_use}' not available. Available backends: {list(self.backends.keys())}")
             # Record failed prediction
@@ -899,7 +1002,11 @@ class AIBackendManager:
         start_time = time.time()
         
         try:
-            result = backend.predict(image_path)
+            # Pass db_session to Ensemble backend for enabled check
+            if isinstance(backend, EnsembleBackend):
+                result = backend.predict(image_path, db_session=db_session)
+            else:
+                result = backend.predict(image_path)
             duration = time.time() - start_time
             
             # Record metrics

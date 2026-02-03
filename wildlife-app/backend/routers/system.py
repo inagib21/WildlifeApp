@@ -42,8 +42,8 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
     @limiter.limit("60/minute")  # Rate limit: 60 requests per minute (frequently polled)
     async def get_system_health(request: Request) -> Dict[str, Any]:
         """Get system health and status information - returns quickly even if some services are slow"""
-        # Check cache first (5 second TTL for system health)
-        cached = get_cached("system_health", ttl=5)
+        # Check cache first (2 second TTL for faster updates)
+        cached = get_cached("system_health", ttl=2)
         if cached:
             return cached
         
@@ -53,7 +53,7 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
             cpu_percent = psutil.cpu_percent(interval=0.01)  # Very short interval for fast response
             memory_percent = psutil.virtual_memory().percent
             
-            # Enhanced disk space monitoring
+            # Enhanced disk space monitoring with time estimate
             try:
                 disk_path = 'C:\\' if os.name == 'nt' else '/'
                 disk = psutil.disk_usage(disk_path)
@@ -62,12 +62,57 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
                 disk_used_gb = disk.used / (1024**3)
                 disk_free_gb = disk.free / (1024**3)
                 disk_alert = disk_percent >= 90  # Alert if >90% full
+                
+                # Calculate time estimate until full
+                # Use simple tracking: compare current usage with previous measurement
+                cache_key_usage = "disk_usage_history"
+                usage_history = get_cached(cache_key_usage, ttl=86400) or []  # 24 hour history
+                
+                current_time = time.time()
+                current_usage = disk_used_gb
+                
+                # Add current measurement
+                usage_history.append({
+                    "timestamp": current_time,
+                    "used_gb": current_usage
+                })
+                
+                # Keep only last 24 hours of data (1 measurement per minute = ~1440 points)
+                # Limit to last 100 measurements for memory efficiency
+                if len(usage_history) > 100:
+                    usage_history = usage_history[-100:]
+                
+                # Calculate fill rate (GB per day)
+                days_until_full = None
+                fill_rate_gb_per_day = None
+                
+                if len(usage_history) >= 2:
+                    # Use first and last measurements to calculate rate
+                    first = usage_history[0]
+                    last = usage_history[-1]
+                    time_diff_seconds = last["timestamp"] - first["timestamp"]
+                    usage_diff_gb = last["used_gb"] - first["used_gb"]
+                    
+                    if time_diff_seconds > 3600:  # Need at least 1 hour of data
+                        fill_rate_gb_per_day = (usage_diff_gb / time_diff_seconds) * 86400  # Convert to per day
+                        
+                        if fill_rate_gb_per_day > 0.01:  # Only if using > 0.01 GB/day
+                            days_until_full = disk_free_gb / fill_rate_gb_per_day
+                        elif fill_rate_gb_per_day < -0.01:  # Disk space decreasing (cleanup happening)
+                            days_until_full = None  # Can't estimate if space is being freed
+                
+                # Cache history for next calculation
+                set_cached(cache_key_usage, usage_history, ttl=86400)
+                
             except Exception as e:
+                logger.warning(f"Error calculating disk usage: {e}")
                 disk_percent = 0
                 disk_total_gb = 0
                 disk_used_gb = 0
                 disk_free_gb = 0
                 disk_alert = False
+                days_until_full = None
+                fill_rate_gb_per_day = None
             
             # Check media directories disk usage
             media_disk_info = {}
@@ -119,7 +164,7 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
                     asyncio.wait_for(
                         asyncio.to_thread(motioneye_client.get_cameras) if hasattr(asyncio, 'to_thread')
                         else asyncio.get_event_loop().run_in_executor(None, motioneye_client.get_cameras),
-                        timeout=3.0  # Reasonable timeout for MotionEye
+                        timeout=1.5  # Faster timeout - fail fast if offline
                     )
                 )
                 
@@ -127,7 +172,7 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
                     asyncio.wait_for(
                         asyncio.to_thread(speciesnet_processor.get_status) if hasattr(asyncio, 'to_thread')
                         else asyncio.get_event_loop().run_in_executor(None, speciesnet_processor.get_status),
-                        timeout=5.0  # Longer timeout for SpeciesNet (model loading can take time)
+                        timeout=30.0  # Increased timeout - SpeciesNet can take time to start (model loading)
                     )
                 )
             except AttributeError:
@@ -136,21 +181,21 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
                 motioneye_task = asyncio.create_task(
                     asyncio.wait_for(
                         loop.run_in_executor(None, motioneye_client.get_cameras),
-                        timeout=3.0  # Reasonable timeout for MotionEye
+                        timeout=1.5  # Faster timeout - fail fast if offline
                     )
                 )
                 speciesnet_task = asyncio.create_task(
                     asyncio.wait_for(
                         loop.run_in_executor(None, speciesnet_processor.get_status),
-                        timeout=5.0  # Longer timeout for SpeciesNet (model loading can take time)
+                        timeout=30.0  # Increased timeout - SpeciesNet can take time to start (model loading)
                     )
                 )
             
-            # Wait for both with reasonable overall timeout
+            # Wait for both with faster overall timeout
             try:
                 motioneye_result, speciesnet_result = await asyncio.wait_for(
                     asyncio.gather(motioneye_task, speciesnet_task, return_exceptions=True),
-                    timeout=6.0  # Total timeout for both checks - allow enough time
+                    timeout=3.0  # Faster total timeout - fail fast if services are offline
                 )
                 
                 # Process MotionEye result
@@ -196,6 +241,30 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
                     except Exception as e:
                         logging.warning(f"Failed to send disk space alert: {e}")
             
+            # Get database size
+            db_size_bytes = 0
+            db_size_pretty = "N/A"
+            try:
+                # Get database session from dependency
+                from ..database import SessionLocal
+                db = SessionLocal()
+                try:
+                    # PostgreSQL specific query
+                    result = db.execute(text("SELECT pg_database_size(current_database());")).scalar()
+                    if result is not None:
+                        db_size_bytes = result
+                        # Convert bytes to human-readable format
+                        size_bytes = db_size_bytes
+                        for unit in ['bytes', 'KB', 'MB', 'GB', 'TB']:
+                            if size_bytes < 1024.0:
+                                db_size_pretty = f"{size_bytes:.2f} {unit}"
+                                break
+                            size_bytes /= 1024.0
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"Error getting database size: {e}")
+            
             # Compose response immediately
             result = {
                 "status": "running",
@@ -207,6 +276,10 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
                     "disk_used_gb": round(disk_used_gb, 2),
                     "disk_free_gb": round(disk_free_gb, 2),
                     "disk_alert": disk_alert,
+                    "fill_rate_gb_per_day": round(fill_rate_gb_per_day, 3) if fill_rate_gb_per_day else None,
+                    "days_until_full": round(days_until_full, 1) if days_until_full else None,
+                    "database_size": db_size_pretty,
+                    "database_size_bytes": db_size_bytes,
                     "media_disk_info": media_disk_info,
                     "timestamp": datetime.utcnow().isoformat()
                 },
@@ -234,6 +307,8 @@ def setup_system_router(limiter: Limiter, get_db) -> APIRouter:
                     "disk_used_gb": 0,
                     "disk_free_gb": 0,
                     "disk_alert": False,
+                    "fill_rate_gb_per_day": None,
+                    "days_until_full": None,
                     "media_disk_info": {},
                     "timestamp": datetime.utcnow().isoformat()
                 },

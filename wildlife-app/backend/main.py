@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Request, Header
+from fastapi import FastAPI, HTTPException, Depends, Request, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -11,14 +11,14 @@ import logging
 
 # Import from new modular structure
 try:
-    from config import MOTIONEYE_URL, SPECIESNET_URL, ALLOWED_ORIGINS
+    from config import MOTIONEYE_URL, SPECIESNET_URL, ALLOWED_ORIGINS, DATABASE_URL
     from database import engine, SessionLocal, Base, Camera, Detection, Webhook
     from services.motioneye import motioneye_client
     from services.speciesnet import speciesnet_processor
     from services.notifications import notification_service
 except ImportError:
     # Fallback for direct execution
-    from config import MOTIONEYE_URL, SPECIESNET_URL, ALLOWED_ORIGINS
+    from config import MOTIONEYE_URL, SPECIESNET_URL, ALLOWED_ORIGINS, DATABASE_URL
     from database import engine, SessionLocal, Base, Camera, Detection, Webhook
     from services.motioneye import motioneye_client
     from services.speciesnet import speciesnet_processor
@@ -58,12 +58,92 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
+# Add exception handler for validation errors
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle validation errors and return detailed error messages"""
+    errors = exc.errors()
+    error_details = []
+    for error in errors:
+        error_details.append({
+            "field": ".".join(str(x) for x in error.get("loc", [])),
+            "message": error.get("msg", "Validation error"),
+            "type": error.get("type", "unknown")
+        })
+    
+    logging.error(f"Validation error on {request.url.path}: {error_details}")
+    
+    # Set CORS headers for error response
+    response = JSONResponse(
+        status_code=400,
+        content={
+            "detail": f"Validation error: {', '.join([e['message'] for e in error_details])}",
+            "errors": error_details
+        }
+    )
+    origin = request.headers.get("Origin")
+    if origin and (origin in ALLOWED_ORIGINS or "localhost:3000" in origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions and ensure proper JSON response with CORS"""
+    logging.error(f"HTTPException on {request.url.path}: {exc.status_code} - {exc.detail}")
+    
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": exc.detail if exc.detail else f"HTTP {exc.status_code} error"
+        }
+    )
+    # Set CORS headers for error response
+    origin = request.headers.get("Origin")
+    if origin and (origin in ALLOWED_ORIGINS or "localhost:3000" in origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
 # Basic health check - must be before routers so it works even if routers fail
 @app.get("/health")
-def health_check():
+def health_check(request: Request, response: Response):
     """Basic health check endpoint - works even if database is down"""
-    return {"status": "healthy", "service": "wildlife-backend"}
+    from datetime import datetime
+    # Explicitly set CORS headers for health check - allow all origins for health check
+    origin = request.headers.get("Origin")
+    if origin:
+        # Allow the origin if it's in ALLOWED_ORIGINS, or if it's localhost:3000 (frontend)
+        if origin in ALLOWED_ORIGINS or "localhost:3000" in origin or "127.0.0.1:3000" in origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    else:
+        # If no origin header, allow all (for direct browser access)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    return {
+        "status": "healthy",
+        "service": "wildlife-backend",
+        "timestamp": datetime.now().isoformat(),
+        "message": "Backend is running"
+    }
 
+
+# CORS middleware - MUST be added BEFORE rate limiter to handle OPTIONS preflight
+# Note: CORS middleware must be added before routers to handle preflight OPTIONS requests
+# IMPORTANT: CORS middleware handles OPTIONS automatically, but we need to ensure it's first
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key", "Accept", "Origin", "X-Requested-With"],
+    expose_headers=["Content-Type", "Authorization", "Location"],
+)
 
 # Rate limiting middleware - protect against API abuse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -139,15 +219,6 @@ def verify_api_key(
     
     return api_key_record
 
-# CORS middleware - restrict to specific origins and methods for security
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-API-Key"],
-)
-
 # Real-time event management
 try:
     from services.events import get_event_manager
@@ -195,8 +266,11 @@ except Exception as e:
     # Tables will be created during startup event
     pass
 
-@app.on_event("startup")
-async def startup_event():
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     try:
         logging.info("=" * 50)
         logging.info("Wildlife Backend Starting...")
@@ -218,7 +292,9 @@ async def startup_event():
         except Exception as e:
             logging.warning(f"Camera sync service failed to start: {e}")
         
-        # Test database connection and create tables
+        # Initialize database
+        logging.info("Starting database connection...")
+        logging.info(f"Database URL host/db: {DATABASE_URL.split('@')[-1]}")
         try:
             with engine.connect() as conn:
                 pass
@@ -230,23 +306,17 @@ async def startup_event():
                 logging.info("[OK] Database tables created/verified")
             except Exception as e:
                 logging.warning(f"Table creation failed: {e}")
-            
-            # Migration: add file_hash column if not present (after tables exist)
+                
+            # Run migrations (columns and indexes)
             try:
-                insp = inspect(engine)
-                if not any(c['name'] == 'file_hash' for c in insp.get_columns('detections')):
-                    with engine.connect() as conn:
-                        conn.execute(text('ALTER TABLE detections ADD COLUMN file_hash VARCHAR'))
-                        conn.commit()
-                        logging.info('[OK] Added file_hash column to detections table')
+                from services.migrations import check_and_run_migrations
+                check_and_run_migrations(engine)
             except Exception as migration_error:
                 logging.warning(f"Migration warning (non-critical): {migration_error}")
-                
         except Exception as e:
             logging.error(f"Database connection failed: {e}")
             logging.error("  Please ensure PostgreSQL is running and accessible")
-            logging.error("  The backend will continue but database features may not work")
-            # Continue startup - the app can still run without database initially
+            logging.warning("  Backend will continue but database features may not work")
         
         # Enable background photo scanner task
         try:
@@ -255,12 +325,86 @@ async def startup_event():
         except Exception as e:
             logging.warning(f"Photo scanner failed to start: {e}")
         
+        # Check external services - these are REQUIRED
+        motioneye_online = False
+        speciesnet_online = False
+        
+        try:
+            from services.motioneye import motioneye_client
+            motioneye_status = motioneye_client.get_status()
+            if motioneye_status == "running":
+                logging.info("[OK] MotionEye is running")
+                motioneye_online = True
+            else:
+                logging.error(f"[ERROR] MotionEye status: {motioneye_status}")
+                logging.error("  MotionEye is REQUIRED for camera management")
+                logging.error(f"  Please start MotionEye at: {MOTIONEYE_URL}")
+                logging.error("  Run: docker-compose up -d motioneye")
+                logging.error("  Or use: start_motioneye.bat")
+        except Exception as e:
+            logging.error(f"[ERROR] Could not check MotionEye status: {e}")
+            logging.error("  MotionEye is REQUIRED - please start it")
+        
+        try:
+            from services.speciesnet import speciesnet_processor
+            speciesnet_status = speciesnet_processor.get_status()
+            if speciesnet_status == "running":
+                logging.info("[OK] SpeciesNet is running")
+                speciesnet_online = True
+            else:
+                logging.error(f"[ERROR] SpeciesNet status: {speciesnet_status}")
+                logging.error("  SpeciesNet is REQUIRED for AI predictions")
+                logging.error(f"  Please start SpeciesNet at: {SPECIESNET_URL}")
+                logging.error("  Run: npm run speciesnet:venv")
+                logging.error("  Or use: start_speciesnet.bat")
+        except Exception as e:
+            logging.error(f"[ERROR] Could not check SpeciesNet status: {e}")
+            logging.error("  SpeciesNet is REQUIRED - please start it")
+        
+        # Load known faces on startup for face recognition
+        try:
+            from services.face_recognition import face_recognition_service
+            if face_recognition_service.is_available():
+                # Get a database session to load faces
+                db = SessionLocal()
+                try:
+                    face_recognition_service.load_known_faces(db)
+                    face_count = len(face_recognition_service.known_faces)
+                    if face_count > 0:
+                        logging.info(f"[OK] Loaded {face_count} known face(s) for recognition")
+                    else:
+                        logging.info("[INFO] No known faces loaded (add faces in UI to enable recognition)")
+                finally:
+                    db.close()
+            else:
+                logging.info("[INFO] Face recognition not available (install face-recognition library)")
+        except Exception as e:
+            logging.warning(f"Could not load known faces on startup: {e}")
+            logging.warning("  Face recognition will still work but faces may need manual reload")
+        
+        # Warn if services are not online
+        if not motioneye_online or not speciesnet_online:
+            logging.error("=" * 50)
+            logging.error("[WARNING] Required services are offline!")
+            logging.error("=" * 50)
+            if not motioneye_online:
+                logging.error("  MotionEye: OFFLINE - Camera features will not work")
+            if not speciesnet_online:
+                logging.error("  SpeciesNet: OFFLINE - AI predictions will not work")
+            logging.error("=" * 50)
+            logging.error("To start all services, run: start_all_services.bat")
+            logging.error("Or start individually:")
+            logging.error("  - MotionEye: start_motioneye.bat")
+            logging.error("  - SpeciesNet: start_speciesnet.bat")
+            logging.error("=" * 50)
+        
         logging.info("=" * 50)
         logging.info("[OK] Backend startup completed!")
         logging.info("=" * 50)
         logging.info(f"Backend API available at: http://localhost:8001")
         logging.info(f"API Documentation at: http://localhost:8001/docs")
         logging.info("=" * 50)
+        
     except Exception as e:
         logging.error("=" * 50)
         logging.error("[ERROR] CRITICAL ERROR during startup!")
@@ -268,15 +412,16 @@ async def startup_event():
         logging.error(f"Error: {e}")
         import traceback
         logging.error(traceback.format_exc())
-        logging.error("=" * 50)
-        logging.error("Backend will attempt to continue, but some features may not work.")
-        logging.error("Check the error above and fix the issue, then restart the backend.")
-        logging.error("=" * 50)
-        # Don't raise - let the app continue running so we can see the error
-
-@app.on_event("shutdown")
-async def shutdown_event():
+            
+    yield
+    
+    # Shutdown
     await camera_sync_service.stop()
+
+# Assign lifespan to the existing app instance (defined at top of file)
+# This preserves the middleware setup while enabling startup/shutdown events
+app.router.lifespan_context = lifespan
+
 
 # Background camera sync function (legacy - kept for compatibility)
 async def sync_cameras_background(cameras):
@@ -449,6 +594,15 @@ try:
     from routers.audit import setup_audit_router
     from routers.species import setup_species_router
     from routers.ai import router as ai_router
+    from routers.settings import router as settings_router
+    from routers.faces import router as faces_router
+    from routers.sensors import setup_sensors_router
+    from routers.chat import setup_chat_router
+    from routers.models import setup_models_router
+    from routers.graphs import setup_graphs_router
+    from routers.map import setup_map_router
+    from routers.geofence import setup_geofence_router
+    from routers.sound_detections import setup_sound_detections_router
 except ImportError:
     from .routers.system import setup_system_router
     from .routers.cameras import setup_cameras_router
@@ -465,6 +619,15 @@ except ImportError:
     from .routers.audit import setup_audit_router
     from .routers.species import setup_species_router
     from .routers.ai import router as ai_router
+    from .routers.settings import router as settings_router
+    from .routers.faces import router as faces_router
+    from .routers.sensors import setup_sensors_router
+    from .routers.chat import setup_chat_router
+    from .routers.models import setup_models_router
+    from .routers.graphs import setup_graphs_router
+    from .routers.map import setup_map_router
+    from .routers.geofence import setup_geofence_router
+    from .routers.sound_detections import setup_sound_detections_router
 
 # Setup and include routers
 system_router = setup_system_router(limiter, get_db)
@@ -481,6 +644,13 @@ analytics_router = setup_analytics_router(limiter, get_db)
 auth_router = setup_auth_router(limiter, get_db)
 audit_router = setup_audit_router(limiter, get_db)
 species_router = setup_species_router(limiter, get_db)
+sensors_router = setup_sensors_router(limiter, get_db)
+chat_router = setup_chat_router(limiter, get_db)
+models_router = setup_models_router(limiter, get_db)
+graphs_router = setup_graphs_router(limiter, get_db)
+map_router = setup_map_router(limiter, get_db)
+geofence_router = setup_geofence_router(limiter, get_db)
+sound_detections_router = setup_sound_detections_router(limiter, get_db)
 
 app.include_router(system_router)
 app.include_router(cameras_router)
@@ -495,9 +665,17 @@ app.include_router(debug_router)
 app.include_router(analytics_router)
 app.include_router(auth_router)
 app.include_router(audit_router)
-app.include_router(audit_router)
 app.include_router(species_router)
 app.include_router(ai_router)
+app.include_router(settings_router)
+app.include_router(faces_router)
+app.include_router(sensors_router)
+app.include_router(chat_router)
+app.include_router(models_router)
+app.include_router(graphs_router)
+app.include_router(map_router)
+app.include_router(geofence_router)
+app.include_router(sound_detections_router)
 
 # Initialize scheduled tasks on startup
 try:

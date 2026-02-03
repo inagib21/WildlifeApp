@@ -3,7 +3,10 @@ import time
 from collections import deque
 from typing import Deque, Dict, Tuple
 
-_DEFAULT_TTL = float(os.getenv("MOTIONEYE_EVENT_TTL_SECONDS", "10"))
+# Reduced TTL from 10 to 5 seconds to prevent blocking legitimate detections
+# MotionEye may send the same file path multiple times, but we want to process
+# new detections quickly. 5 seconds is enough to prevent true duplicates.
+_DEFAULT_TTL = float(os.getenv("MOTIONEYE_EVENT_TTL_SECONDS", "5"))
 
 _recent_events: Deque[Tuple[str, float]] = deque()
 _recent_lookup: Dict[str, float] = {}

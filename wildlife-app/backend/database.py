@@ -1,10 +1,13 @@
 """Database setup and models"""
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, Index
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, Index, event, DDL
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
-from config import DATABASE_URL
+from config import DATABASE_URL, DB_SCHEMA, ENVIRONMENT
 from sqlalchemy.pool import QueuePool
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Configure connection pooling for better performance
 engine = create_engine(
@@ -20,6 +23,16 @@ engine = create_engine(
     },
     echo=False
 )
+
+# Set default schema for all connections
+if DB_SCHEMA and DB_SCHEMA != "public":
+    @event.listens_for(engine, "connect", insert=True)
+    def set_search_path(dbapi_conn, connection_record):
+        """Set the search_path for each connection to use the specified schema"""
+        cursor = dbapi_conn.cursor()
+        cursor.execute(f"SET search_path TO {DB_SCHEMA}, public")
+        cursor.close()
+        logger.info(f"Set database search_path to {DB_SCHEMA}")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -58,6 +71,14 @@ class Camera(Base):
     movie_codec = Column(String, default="mkv")
     snapshot_interval = Column(Integer, default=0)
     target_dir = Column(String, default="./motioneye_media")
+    # Location fields (GPS and address)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    address = Column(String, nullable=True)  # Human-readable address
+    # Geofencing fields (per-camera)
+    geofence_enabled = Column(Boolean, default=False, nullable=False)
+    geofence_type = Column(String, nullable=True)  # "polygon", "circle", "bounds"
+    geofence_data = Column(Text, nullable=True)  # JSON string storing geofence configuration
 
 
 class Detection(Base):
@@ -83,6 +104,14 @@ class Detection(Base):
     prediction_score = Column(Float, nullable=True)
     detections_json = Column(Text, nullable=True)  # Store full detection data as JSON
     file_hash = Column(String, nullable=True, index=True)  # SHA256 hash of file for deduplication
+    # Audio support
+    audio_path = Column(String, nullable=True)  # Path to audio file if available
+    # Video support
+    video_path = Column(String, nullable=True)  # Path to video file if available
+    # Sensor data from ESP32
+    temperature = Column(Float, nullable=True)  # Temperature in Celsius
+    humidity = Column(Float, nullable=True)  # Humidity in percentage
+    pressure = Column(Float, nullable=True)  # Atmospheric pressure (optional)
 
 
 class AuditLog(Base):
@@ -106,6 +135,73 @@ class AuditLog(Base):
     error_message = Column(Text, nullable=True)  # Error message if action failed
     # Note: user_id column removed - not in actual database table
     # user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # Link to user who made the change
+
+
+class SensorReading(Base):
+    """Sensor readings from ESP32 cameras (temperature, humidity, pressure)"""
+    __tablename__ = "sensor_readings"
+    __table_args__ = (
+        Index('idx_sensor_camera_timestamp', 'camera_id', 'timestamp'),
+        Index('idx_sensor_timestamp', 'timestamp'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, ForeignKey("cameras.id"), index=True, nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    temperature = Column(Float, nullable=True)  # Temperature in Celsius
+    humidity = Column(Float, nullable=True)  # Humidity in percentage
+    pressure = Column(Float, nullable=True)  # Atmospheric pressure (hPa)
+    detection_id = Column(Integer, ForeignKey("detections.id"), nullable=True)  # Link to detection if available
+
+
+class SoundDetection(Base):
+    """Animal sound detections from audio files"""
+    __tablename__ = "sound_detections"
+    __table_args__ = (
+        Index('idx_sound_detection_timestamp', 'timestamp'),
+        Index('idx_sound_class', 'sound_class'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    detection_id = Column(Integer, ForeignKey("detections.id"), nullable=True)  # Link to image detection
+    camera_id = Column(Integer, ForeignKey("cameras.id"), index=True, nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    sound_class = Column(String, index=True)  # Detected sound/animal
+    confidence = Column(Float)  # Confidence score
+    audio_path = Column(String)  # Path to audio file
+    duration = Column(Float, nullable=True)  # Audio duration in seconds
+    audio_features = Column(Text, nullable=True)  # JSON string with audio features
+
+
+class ChatHistory(Base):
+    """Chat history for interactive query interface"""
+    __tablename__ = "chat_history"
+    __table_args__ = (
+        Index('idx_chat_timestamp', 'timestamp'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    query = Column(Text)  # User query
+    response = Column(Text, nullable=True)  # System response
+    response_type = Column(String, nullable=True)  # Type: 'count', 'list', 'chart', 'text'
+    response_data = Column(Text, nullable=True)  # JSON string with response data
+    user_ip = Column(String, nullable=True)
+    success = Column(Boolean, default=True)
+
+
+class ModelRegistry(Base):
+    """Registry of AI models from Hugging Face, Kaggle, etc."""
+    __tablename__ = "model_registry"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)  # Model name/identifier
+    display_name = Column(String)  # Human-readable name
+    source = Column(String)  # 'huggingface', 'kaggle', 'custom'
+    source_path = Column(String)  # Hugging Face model path, Kaggle dataset, or file path
+    model_type = Column(String)  # 'image_classification', 'object_detection', 'audio', 'text'
+    is_enabled = Column(Boolean, default=True)
+    version = Column(String, nullable=True)
+    description = Column(Text, nullable=True)
+    requirements = Column(Text, nullable=True)  # JSON string with dependencies
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ApiKey(Base):
@@ -179,7 +275,52 @@ class Webhook(Base):
     event_type = Column(String, nullable=False)  # detection, system_alert, etc.
     is_active = Column(Boolean, default=True, index=True)
     secret = Column(String, nullable=True)  # Optional secret for signing payloads
-    headers = Column(Text, nullable=True)  # JSON string for custom headers
+    headers = Column(Text, nullable=True)
+
+
+class SystemSettings(Base):
+    __tablename__ = "system_settings"
+    __table_args__ = (
+        Index('idx_settings_key', 'key'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, unique=True, nullable=False, index=True)  # Setting key (e.g., 'ai_enabled')
+    value = Column(Text, nullable=False)  # Setting value (JSON string for complex values)
+    description = Column(String, nullable=True)  # Human-readable description
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class KnownFace(Base):
+    __tablename__ = "known_faces"
+    __table_args__ = (
+        Index('idx_face_name', 'name'),
+        Index('idx_face_active', 'is_active'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)  # Person's name
+    face_encoding = Column(Text, nullable=False)  # Face encoding (JSON array of floats)
+    image_path = Column(String, nullable=True)  # Path to reference image
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    notes = Column(Text, nullable=True)  # Optional notes about the person
+    tolerance = Column(Float, default=0.6, nullable=True)  # Recognition tolerance (lower = stricter, default 0.6)
+
+
+class FaceDetection(Base):
+    __tablename__ = "face_detections"
+    __table_args__ = (
+        Index('idx_face_detection_detection', 'detection_id'),
+        Index('idx_face_detection_known_face', 'known_face_id'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    detection_id = Column(Integer, ForeignKey("detections.id"), nullable=False, index=True)
+    known_face_id = Column(Integer, ForeignKey("known_faces.id"), nullable=True, index=True)  # null if unknown
+    confidence = Column(Float, nullable=False)  # Confidence score (0.0-1.0)
+    face_location = Column(Text, nullable=True)  # Face bounding box (JSON: [top, right, bottom, left])
+    face_encoding = Column(Text, nullable=True)  # Detected face encoding (JSON array)
+    created_at = Column(DateTime, default=datetime.utcnow)  # JSON string for custom headers
     retry_count = Column(Integer, default=3)  # Number of retry attempts
     retry_delay = Column(Integer, default=5)  # Delay between retries in seconds
     timeout = Column(Integer, default=10)  # Request timeout in seconds
@@ -191,12 +332,45 @@ class Webhook(Base):
     filters = Column(Text, nullable=True)  # JSON string for event filters (e.g., min_confidence, species)
 
 
+# Schema creation function
+def create_schema_if_not_exists(schema_name: str):
+    """Create a database schema if it doesn't exist"""
+    if schema_name == "public":
+        return  # Public schema always exists
+    
+    try:
+        with engine.connect() as conn:
+            # Check if schema exists
+            result = conn.execute(
+                text(f"SELECT schema_name FROM information_schema.schemata WHERE schema_name = '{schema_name}'")
+            )
+            if not result.fetchone():
+                # Create schema
+                conn.execute(DDL(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
+                conn.commit()
+                logger.info(f"Created database schema: {schema_name}")
+            else:
+                logger.info(f"Database schema {schema_name} already exists")
+    except Exception as e:
+        logger.warning(f"Could not create schema {schema_name}: {e}")
+
+# Create schema on module import if not public
+if DB_SCHEMA and DB_SCHEMA != "public" and ENVIRONMENT in ["test", "production"]:
+    create_schema_if_not_exists(DB_SCHEMA)
+
 # Add error handling for database connection
 try:
     # Test the connection
     with engine.connect() as conn:
-        pass
-    print("Successfully connected to PostgreSQL database")
+        # Verify schema is accessible
+        if DB_SCHEMA and DB_SCHEMA != "public":
+            result = conn.execute(
+                text("SELECT current_schema()")
+            )
+            current_schema = result.fetchone()[0]
+            logger.info(f"Connected to PostgreSQL database (schema: {current_schema})")
+        else:
+            logger.info("Successfully connected to PostgreSQL database")
 except Exception as e:
-    print(f"Warning: Error connecting to database: {e}")
-    print("Database connection will be retried during startup")
+    logger.warning(f"Error connecting to database: {e}")
+    logger.warning("Database connection will be retried during startup")

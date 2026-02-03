@@ -1,13 +1,26 @@
 """Background task scheduler for automated operations"""
 import asyncio
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Optional, Callable
 import threading
-from apscheduler.schedulers.background import BackgroundScheduler  # pyright: ignore[reportMissingImports]
-from apscheduler.triggers.cron import CronTrigger  # pyright: ignore[reportMissingImports]
-from apscheduler.triggers.interval import IntervalTrigger  # pyright: ignore[reportMissingImports]
-from datetime import timedelta
+
+# Try to import APScheduler, but handle gracefully if not available
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+    APSCHEDULER_AVAILABLE = True
+except ImportError:
+    APSCHEDULER_AVAILABLE = False
+    BackgroundScheduler = None
+    CronTrigger = None
+    IntervalTrigger = None
+
+logger = logging.getLogger(__name__)
+
+if not APSCHEDULER_AVAILABLE:
+    logger.warning("APScheduler not available. Scheduled tasks will be disabled. Install with: pip install APScheduler>=3.10.0")
 
 try:
     from ..services.backup import backup_service
@@ -16,16 +29,30 @@ except ImportError:
     from services.backup import backup_service
     from services.notifications import notification_service
 
-logger = logging.getLogger(__name__)
-
 
 class TaskScheduler:
     """Scheduler for automated background tasks"""
     
     def __init__(self):
-        self.scheduler = BackgroundScheduler()
-        self.scheduler.start()
-        logger.info("Task scheduler started")
+        if not APSCHEDULER_AVAILABLE:
+            self.scheduler = None
+            logger.warning("Task scheduler not available (APScheduler not installed)")
+            return
+        
+        try:
+            self.scheduler = BackgroundScheduler()
+            self.scheduler.start()
+            logger.info("Task scheduler started")
+        except Exception as e:
+            logger.error(f"Failed to start task scheduler: {e}")
+            self.scheduler = None
+    
+    def _check_scheduler(self):
+        """Check if scheduler is available"""
+        if not APSCHEDULER_AVAILABLE or self.scheduler is None:
+            logger.warning("Scheduler not available - cannot schedule task")
+            return False
+        return True
     
     def schedule_daily_backup(self, hour: int = 2, minute: int = 0):
         """
@@ -49,6 +76,9 @@ class TaskScheduler:
                     logger.error("Scheduled backup failed")
             except Exception as e:
                 logger.error(f"Scheduled backup error: {e}", exc_info=True)
+        
+        if not self._check_scheduler():
+            return
         
         # Schedule daily at specified time
         self.scheduler.add_job(
@@ -77,6 +107,9 @@ class TaskScheduler:
                     logger.info(f"Scheduled weekly backup completed: {backup_path}")
             except Exception as e:
                 logger.error(f"Scheduled weekly backup error: {e}", exc_info=True)
+        
+        if not self._check_scheduler():
+            return
         
         # Schedule weekly
         self.scheduler.add_job(
@@ -112,6 +145,9 @@ class TaskScheduler:
             except Exception as e:
                 logger.error(f"Scheduled monthly backup error: {e}", exc_info=True)
         
+        if not self._check_scheduler():
+            return
+        
         # Schedule monthly on specified day
         self.scheduler.add_job(
             backup_job,
@@ -137,6 +173,9 @@ class TaskScheduler:
                     logger.info(f"Cleaned up {deleted} old backup(s)")
             except Exception as e:
                 logger.error(f"Scheduled cleanup error: {e}", exc_info=True)
+        
+        if not self._check_scheduler():
+            return
         
         self.scheduler.add_job(
             cleanup_job,
@@ -172,6 +211,9 @@ class TaskScheduler:
         else:
             raise ValueError(f"Unknown trigger type: {trigger_type}")
         
+        if not self._check_scheduler():
+            return
+        
         self.scheduler.add_job(
             func,
             trigger=trigger,
@@ -183,6 +225,9 @@ class TaskScheduler:
     
     def get_jobs(self):
         """Get list of all scheduled jobs"""
+        if not self._check_scheduler():
+            return []
+        
         return [
             {
                 "id": job.id,
@@ -195,6 +240,9 @@ class TaskScheduler:
     
     def remove_job(self, job_id: str):
         """Remove a scheduled job"""
+        if not self._check_scheduler():
+            return False
+        
         try:
             self.scheduler.remove_job(job_id)
             logger.info(f"Removed job: {job_id}")
@@ -205,8 +253,14 @@ class TaskScheduler:
     
     def shutdown(self):
         """Shutdown the scheduler"""
-        self.scheduler.shutdown()
-        logger.info("Task scheduler shut down")
+        if not self._check_scheduler():
+            return
+        
+        try:
+            self.scheduler.shutdown()
+            logger.info("Task scheduler shut down")
+        except Exception as e:
+            logger.error(f"Error shutting down scheduler: {e}")
 
 
 # Global scheduler instance
@@ -264,7 +318,15 @@ def schedule_audit_log_cleanup(retention_days: int = 90, day: int = 1, hour: int
 
 def initialize_scheduled_tasks():
     """Initialize default scheduled tasks"""
+    if not APSCHEDULER_AVAILABLE:
+        logger.warning("Cannot initialize scheduled tasks - APScheduler not installed")
+        return
+    
     scheduler = get_scheduler()
+    
+    if scheduler.scheduler is None:
+        logger.warning("Cannot initialize scheduled tasks - scheduler not started")
+        return
     
     # Schedule monthly backup (configurable via environment variables)
     try:
@@ -297,6 +359,9 @@ def initialize_scheduled_tasks():
     # Schedule weekly report generation on Monday at 8:00 AM
     schedule_report_generation(day_of_week=0, hour=8, minute=0)
     
+    # Schedule auto-zip task (daily at 5:00 AM, checks if enabled in settings)
+    schedule_auto_zip(hour=5, minute=0)
+    
     logger.info("Initialized default scheduled tasks")
 
 
@@ -322,6 +387,10 @@ def schedule_image_archival(hour: int = 4, minute: int = 0, limit: int = 100):
         minute: Minute of hour to run archival
         limit: Maximum number of detections to process per run
     """
+    if not APSCHEDULER_AVAILABLE:
+        logger.warning("Cannot schedule image archival - APScheduler not installed")
+        return
+    
     def archival_job():
         try:
             from database import SessionLocal
@@ -340,6 +409,10 @@ def schedule_image_archival(hour: int = 4, minute: int = 0, limit: int = 100):
             logger.error(f"Failed to run scheduled image archival: {e}", exc_info=True)
     
     scheduler = get_scheduler()
+    if scheduler.scheduler is None:
+        logger.warning("Cannot schedule image archival - scheduler not started")
+        return
+    
     scheduler.scheduler.add_job(
         archival_job,
         trigger=CronTrigger(hour=hour, minute=minute),
@@ -350,6 +423,61 @@ def schedule_image_archival(hour: int = 4, minute: int = 0, limit: int = 100):
     logger.info(f"Scheduled image archival daily at {hour:02d}:{minute:02d} (limit: {limit})")
 
 
+def schedule_auto_zip(hour: int = 5, minute: int = 0):
+    """
+    Schedule automatic image zipping based on retention period
+    
+    Args:
+        hour: Hour of day to run auto-zip check
+        minute: Minute of hour to run auto-zip check
+    """
+    if not APSCHEDULER_AVAILABLE:
+        logger.warning("Cannot schedule auto-zip - APScheduler not installed")
+        return
+    
+    def auto_zip_job():
+        try:
+            from database import SessionLocal
+            from services.auto_zip import auto_zip_service
+            
+            logger.info("Starting scheduled auto-zip check")
+            db = SessionLocal()
+            try:
+                config = auto_zip_service.get_config(db)
+                
+                if not config["enabled"]:
+                    logger.debug("Auto-zip is disabled, skipping")
+                    return
+                
+                retention_months = config["retention_months"]
+                stats = auto_zip_service.zip_images(
+                    db=db,
+                    retention_months=retention_months,
+                    dry_run=False
+                )
+                logger.info(f"Scheduled auto-zip completed: {stats}")
+            except Exception as e:
+                logger.error(f"Scheduled auto-zip error: {e}", exc_info=True)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"Failed to run scheduled auto-zip: {e}", exc_info=True)
+    
+    scheduler = get_scheduler()
+    if scheduler.scheduler is None:
+        logger.warning("Cannot schedule auto-zip - scheduler not started")
+        return
+    
+    scheduler.scheduler.add_job(
+        auto_zip_job,
+        trigger=CronTrigger(hour=hour, minute=minute),
+        id='auto_zip',
+        name='Auto-Zip Old Images',
+        replace_existing=True
+    )
+    logger.info(f"Scheduled auto-zip daily at {hour:02d}:{minute:02d}")
+
+
 def schedule_camera_sync(interval_hours: int = 6):
     """
     Schedule periodic camera synchronization with MotionEye
@@ -357,6 +485,10 @@ def schedule_camera_sync(interval_hours: int = 6):
     Args:
         interval_hours: Hours between sync runs
     """
+    if not APSCHEDULER_AVAILABLE:
+        logger.warning("Cannot schedule camera sync - APScheduler not installed")
+        return
+    
     def sync_job():
         try:
             from camera_sync import sync_motioneye_cameras
@@ -382,6 +514,10 @@ def schedule_camera_sync(interval_hours: int = 6):
             logger.error(f"Failed to run scheduled camera sync: {e}", exc_info=True)
     
     scheduler = get_scheduler()
+    if scheduler.scheduler is None:
+        logger.warning("Cannot schedule camera sync - scheduler not started")
+        return
+    
     scheduler.scheduler.add_job(
         sync_job,
         trigger=IntervalTrigger(hours=interval_hours),
@@ -399,6 +535,10 @@ def schedule_system_health_check(interval_hours: int = 1):
     Args:
         interval_hours: Hours between health checks
     """
+    if not APSCHEDULER_AVAILABLE:
+        logger.warning("Cannot schedule system health check - APScheduler not installed")
+        return
+    
     def health_check_job():
         try:
             import psutil
@@ -438,6 +578,10 @@ def schedule_system_health_check(interval_hours: int = 1):
             logger.error(f"Scheduled system health check error: {e}", exc_info=True)
     
     scheduler = get_scheduler()
+    if scheduler.scheduler is None:
+        logger.warning("Cannot schedule system health check - scheduler not started")
+        return
+    
     scheduler.scheduler.add_job(
         health_check_job,
         trigger=IntervalTrigger(hours=interval_hours),
@@ -457,6 +601,10 @@ def schedule_report_generation(day_of_week: int = 0, hour: int = 8, minute: int 
         hour: Hour of day (0-23)
         minute: Minute of hour (0-59)
     """
+    if not APSCHEDULER_AVAILABLE:
+        logger.warning("Cannot schedule report generation - APScheduler not installed")
+        return
+    
     def report_job():
         try:
             from database import SessionLocal, Detection
@@ -491,6 +639,10 @@ def schedule_report_generation(day_of_week: int = 0, hour: int = 8, minute: int 
             logger.error(f"Failed to run scheduled report generation: {e}", exc_info=True)
     
     scheduler = get_scheduler()
+    if scheduler.scheduler is None:
+        logger.warning("Cannot schedule report generation - scheduler not started")
+        return
+    
     scheduler.scheduler.add_job(
         report_job,
         trigger=CronTrigger(day_of_week=day_of_week, hour=hour, minute=minute),
